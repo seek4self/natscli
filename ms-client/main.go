@@ -18,8 +18,8 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/choria-io/fisk"
 	"github.com/nats-io/natscli/cli"
+	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var version = "development"
@@ -31,24 +31,25 @@ STHG-MS and JetStream administration.
 
 See 'ms-client cheat' for a quick cheatsheet of commands`
 
-	ncli := fisk.New("ms-client", help)
-	ncli.Author("STHG-MS Authors")
+	ncli := kingpin.New("ms-client", help)
+	ncli.Author("STHG Authors")
 	ncli.UsageWriter(os.Stdout)
-	ncli.UsageTemplate(fisk.CompactMainUsageTemplate)
-	ncli.ErrorUsageTemplate(fisk.CompactMainUsageTemplate)
 	ncli.Version(getVersion())
 	ncli.HelpFlag.Short('h')
-	ncli.WithCheats().CheatCommand.Hidden()
 
-	opts, err := cli.ConfigureInApp(ncli, nil, true)
+	opts, err := cli.ConfigureInApp(ncli, nil, true,
+		"backup", "context", "errors", "events",
+		"governor", "kv", "latency", "object",
+		"restore", "rtt", "schema", "server",
+	)
 	if err != nil {
 		return
 	}
 	cli.SetVersion(version)
 
-	ncli.Flag("server", "STHG-MS server urls").Short('s').Envar("STHG_URL").PlaceHolder("URL").StringVar(&opts.Servers)
-	ncli.Flag("user", "Username or Token").Envar("STHG_USER").PlaceHolder("USER").StringVar(&opts.Username)
-	ncli.Flag("password", "Password").Envar("STHG_PASSWORD").PlaceHolder("PASSWORD").StringVar(&opts.Password)
+	ncli.Flag("server", "STHG-MS server urls").Short('s').Envar("STHG_URL").PlaceHolder("STHG_URL").StringVar(&opts.Servers)
+	ncli.Flag("user", "Username or Token").Envar("STHG_USER").PlaceHolder("STHG_USER").StringVar(&opts.Username)
+	ncli.Flag("password", "Password").Envar("STHG_PASSWORD").PlaceHolder("STHG_PASSWORD").StringVar(&opts.Password)
 	ncli.Flag("connection-name", "Nickname to use for the underlying STHG Connection").Default("STHG CLI Version " + version).PlaceHolder("NAME").StringVar(&opts.ConnectionName)
 	ncli.Flag("creds", "User credentials").Envar("STHG_CREDS").PlaceHolder("FILE").StringVar(&opts.Creds)
 	ncli.Flag("nkey", "User NKEY").Envar("STHG_NKEY").PlaceHolder("FILE").StringVar(&opts.Nkey)
@@ -61,12 +62,12 @@ See 'ms-client cheat' for a quick cheatsheet of commands`
 	ncli.Flag("js-domain", "JetStream domain to access").PlaceHolder("DOMAIN").StringVar(&opts.JsDomain)
 	ncli.Flag("inbox-prefix", "Custom inbox prefix to use for inboxes").PlaceHolder("PREFIX").StringVar(&opts.InboxPrefix)
 	ncli.Flag("domain", "JetStream domain to access").PlaceHolder("DOMAIN").Hidden().StringVar(&opts.JsDomain)
-	ncli.Flag("context", "Configuration context").Envar("STHG_CONTEXT").PlaceHolder("NAME").StringVar(&opts.CfgCtx)
-	ncli.Flag("trace", "Trace API interactions").UnNegatableBoolVar(&opts.Trace)
+	ncli.Flag("context", "Configuration context").Envar("STHG_CONTEXT").Hidden().PlaceHolder("NAME").StringVar(&opts.CfgCtx)
+	ncli.Flag("trace", "Trace API interactions").BoolVar(&opts.Trace)
 
 	log.SetFlags(log.Ltime)
 
-	ncli.MustParseWithUsage(os.Args[1:])
+	kingpin.MustParse(ncli.Parse(os.Args[1:]))
 }
 
 func getVersion() string {
