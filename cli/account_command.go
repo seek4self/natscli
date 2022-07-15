@@ -63,13 +63,13 @@ func configureActCommand(app commandHost) {
 	restore.Flag("tag", "Place the stream on servers that has specific tags (pass multiple times)").StringsVar(&c.placementTags)
 
 	cheats["account"] = `# To view account information and connection
-nats account info
+ms-client account info
 
 # To report connections for your command
-nats account report connections
+ms-client account report connections
 
 # To backup all JetStream streams
-nats account backup /path/to/backup --check
+ms-client account backup /path/to/backup --check
 `
 }
 

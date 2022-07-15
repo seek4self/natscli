@@ -100,13 +100,13 @@ func configureBenchCommand(app commandHost) {
 	bench.Flag("multisubject", "Multi-subject mode, each message is published on a subject that includes the publisher's message sequence number as a token").Default("false").BoolVar(&c.multiSubject)
 	bench.Flag("multisubjectmax", "The maximum number of subjects to use in multi-subject mode (0 means no max)").Default("0").IntVar(&c.multiSubjectMax)
 
-	cheats["bench"] = `# benchmark core nats publish and subscribe with 10 publishers and subscribers
+	cheats["bench"] = `# benchmark core ms-client publish and subscribe with 10 publishers and subscribers
 ms-client bench testsubject --pub 10 --sub 10 --msgs 10000 --size 512
 
-# benchmark core nats request-reply without subscribers using a queue
+# benchmark core ms-client request-reply without subscribers using a queue
 ms-client bench testsubject --pub 1 --sub 1 --msgs 10000 --no-queue
 
-# benchmark core nats request-reply with queuing
+# benchmark core ms-client request-reply with queuing
 ms-client bench testsubject --sub 4 --reply
 ms-client bench testsubject --pub 4 --request --msgs 20000
 
@@ -176,7 +176,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 			}
 		}
 		if c.request && c.reply {
-			log.Fatal("Request-reply mode error: can not be both a requester and a replier at the same time, please use at least two instances of nats bench to benchmark request/reply")
+			log.Fatal("Request-reply mode error: can not be both a requester and a replier at the same time, please use at least two instances of ms-client bench to benchmark request/reply")
 		}
 		if c.reply && c.numPubs > 0 && c.numSubs > 0 {
 			log.Fatal("Request-reply mode error: can not have a publisher while in --reply mode")
@@ -257,7 +257,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 			}
 
 			// create bucket
-			_, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: c.subject, History: c.history, Storage: storageType, Description: "nats bench bucket", Replicas: c.replicas, MaxBytes: c.streamMaxBytes})
+			_, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: c.subject, History: c.history, Storage: storageType, Description: "ms-client bench bucket", Replicas: c.replicas, MaxBytes: c.streamMaxBytes})
 			if err != nil {
 				log.Fatalf("Couldn't create the KV bucket: %v", err)
 			}
@@ -266,7 +266,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 				// create the stream with our attributes, will create it if it doesn't exist or make sure the existing one has the same attributes
 				_, err = js.AddStream(&nats.StreamConfig{Name: c.streamName, Subjects: []string{getSubscribeSubject(c)}, Retention: nats.LimitsPolicy, Discard: nats.DiscardNew, Storage: storageType, Replicas: c.replicas, MaxBytes: c.streamMaxBytes})
 				if err != nil {
-					log.Fatalf("%v. If you want to delete and re-define the stream use `nats stream delete %s`.", err, c.streamName)
+					log.Fatalf("%v. If you want to delete and re-define the stream use `ms-client stream delete %s`.", err, c.streamName)
 				}
 			} else if (c.pull || c.pushDurable) && c.numSubs > 0 {
 				log.Printf("Using stream: %s", c.streamName)
@@ -352,7 +352,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 	for i := 0; i < c.numSubs; i++ {
 		nc, err := nats.Connect(opts.Config.ServerURL(), natsOpts()...)
 		if err != nil {
-			return fmt.Errorf("nats connection %d failed: %s", i, err)
+			return fmt.Errorf("ms-client connection %d failed: %s", i, err)
 		}
 		defer nc.Close()
 
@@ -376,7 +376,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 	for i := 0; i < c.numPubs; i++ {
 		nc, err := nats.Connect(opts.Config.ServerURL(), natsOpts()...)
 		if err != nil {
-			return fmt.Errorf("nats connection %d failed: %s", i, err)
+			return fmt.Errorf("ms-client connection %d failed: %s", i, err)
 		}
 		defer nc.Close()
 

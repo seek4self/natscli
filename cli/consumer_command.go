@@ -197,20 +197,20 @@ func configureConsumerCommand(app commandHost) {
 	conClusterDown.Arg("consumer", "Consumer to act on").StringVar(&c.consumer)
 
 	cheats["consumer"] = `# Adding, Removing, Viewing a Consumer
-nats consumer add
-nats consumer info ORDERS NEW
-nats consumer rm ORDERS NEW
+ms-client consumer add
+ms-client consumer info ORDERS NEW
+ms-client consumer rm ORDERS NEW
 
 # Editing a consumer
-nats consumer edit ORDERS NEW --description "new description"
+ms-client consumer edit ORDERS NEW --description "new description"
 
 # Get messages from a consumer
-nats consumer next ORDERS NEW --ack
-nats consumer next ORDERS NEW --no-ack
-nats consumer sub ORDERS NEW --ack
+ms-client consumer next ORDERS NEW --ack
+ms-client consumer next ORDERS NEW --no-ack
+ms-client consumer sub ORDERS NEW --ack
 
 # Force leader election on a consumer
-nats consumer cluster down ORDERS NEW
+ms-client consumer cluster down ORDERS NEW
 `
 }
 
@@ -932,7 +932,7 @@ func (c *consumerCmd) prepareConfig(pc *kingpin.ParseContext) (cfg *api.Consumer
 	if !c.pull && c.delivery == "" {
 		err = askOne(&survey.Input{
 			Message: "Delivery target (empty for Pull Consumers)",
-			Help:    "Consumers can be in 'push' or 'pull' mode, in 'push' mode messages are dispatched in real time to a target NATS subject, this is that subject. Leaving this blank creates a 'pull' mode Consumer. Settable using --target and --pull",
+			Help:    "Consumers can be in 'push' or 'pull' mode, in 'push' mode messages are dispatched in real time to a target STHG-MS subject, this is that subject. Leaving this blank creates a 'pull' mode Consumer. Settable using --target and --pull",
 		}, &c.delivery)
 		kingpin.FatalIfError(err, "could not request delivery target")
 	}

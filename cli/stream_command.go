@@ -300,52 +300,52 @@ func configureStreamCommand(app commandHost) {
 	strTRm.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
 
 	cheats["stream"] = `# Adding, Removing, Viewing a Stream
-nats stream add
-nats stream info STREAMNAME
-nats stream rm STREAMNAME
+ms-client stream add
+ms-client stream info STREAMNAME
+ms-client stream rm STREAMNAME
 
 # Editing a single property of a stream
-nats stream edit STREAMNAME --description "new description"
+ms-client stream edit STREAMNAME --description "new description"
 # Editing a stream configuration in your editor
-EDITOR=vi nats stream edit -i STREAMNAME
+EDITOR=vi ms-client stream edit -i STREAMNAME
 
 # Show a list of streams, including basic info or compatible with pipes
-nats stream list
-nats stream list -n
+ms-client stream list
+ms-client stream list -n
 
 # Find all empty streams or streams with messages
-nats stream find --empty
-nats stream find --empty --invert
+ms-client stream find --empty
+ms-client stream find --empty --invert
 
 # Creates a new Stream based on the config of another, does not copy data
-nats stream copy ORDERS ARCHIVE --description "Orders Archive" --subjects ARCHIVE
+ms-client stream copy ORDERS ARCHIVE --description "Orders Archive" --subjects ARCHIVE
 
 # Get message 12344, delete a message, delete all messages
-nats stream get ORDERS 12345
-nats stream rmm ORDERS 12345
+ms-client stream get ORDERS 12345
+ms-client stream rmm ORDERS 12345
 
 # Purge messages from streams
-nats stream purge ORDERS
+ms-client stream purge ORDERS
 # deletes up to, but not including, 1000
-nats stream purge ORDERS --seq 1000
-nats stream purge ORDERS --keep 100
-nats stream purge ORDERS --subject one.subject
+ms-client stream purge ORDERS --seq 1000
+ms-client stream purge ORDERS --keep 100
+ms-client stream purge ORDERS --subject one.subject
 
 # Page through a stream
-nats stream view ORDERS
-nats stream view --id 1000
-nats stream view --since 1h
-nats stream view --subject one.subject
+ms-client stream view ORDERS
+ms-client stream view --id 1000
+ms-client stream view --since 1h
+ms-client stream view --subject one.subject
 
 # Backup and restore
-nats stream backup ORDERS backups/orders/$(date +%Y-%m-%d)
-nats stream restore ORDERS backups/orders/$(date +%Y-%m-%d)
+ms-client stream backup ORDERS backups/orders/$(date +%Y-%m-%d)
+ms-client stream restore ORDERS backups/orders/$(date +%Y-%m-%d)
 
 # Marks a stream as read only
-nats stream seal ORDERS
+ms-client stream seal ORDERS
 
 # Force a cluster leader election
-nats stream cluster ORDERS down
+ms-client stream cluster ORDERS down
 
 # Evict the stream from a node
 stream cluster peer-remove ORDERS nats1.example.net

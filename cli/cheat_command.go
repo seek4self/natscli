@@ -30,7 +30,7 @@ type cheatCmd struct {
 
 func configureCheatCommand(app commandHost) {
 	c := &cheatCmd{}
-	help := `Cheatsheets for the nats CLI
+	help := `Cheatsheets for the ms-client CLI
 
 These cheatsheets are in a format compatible with the popular https://github.com/cheat/cheat
 command.
@@ -40,14 +40,14 @@ command.
 	cmd.Flag("sections", "Show section names").BoolVar(&c.sections)
 	cmd.Flag("save", "Save cheatsheets to a directory that should not exist").StringVar(&c.save)
 	cheats["cheats"] = `# show a specific section of cheats
-nats cheat pub
+ms-client cheat pub
 
 # list available sections
-nats cheat --sections
+ms-client cheat --sections
 
 # Save cheats to files in the format expected by 'cheats'
 rm -rf .config/cheat/cheatsheets/personal/nats
-nats cheat --save .config/cheat/cheatsheets/personal/nats
+ms-client cheat --save .config/cheat/cheatsheets/personal/nats
 cheat nats/sub
 `
 }

@@ -397,7 +397,7 @@ func natsOpts() []nats.Option {
 
 	connectionName := strings.TrimSpace(opts.ConnectionName)
 	if len(connectionName) == 0 {
-		connectionName = "NATS CLI Version " + Version
+		connectionName = "STHG-MS CLI Version " + Version
 	}
 
 	return append(copts, []nats.Option{
@@ -414,9 +414,9 @@ func natsOpts() []nats.Option {
 		nats.ErrorHandler(func(nc *nats.Conn, _ *nats.Subscription, err error) {
 			url := nc.ConnectedUrl()
 			if url == "" {
-				log.Printf("Unexpected NATS error: %s", err)
+				log.Printf("Unexpected STHG-MS error: %s", err)
 			} else {
-				log.Printf("Unexpected NATS error from server %s: %s", url, err)
+				log.Printf("Unexpected STHG-MS error from server %s: %s", url, err)
 			}
 		}),
 	}...)
