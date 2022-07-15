@@ -50,7 +50,7 @@ See 'ms-client cheat' for a quick cheatsheet of commands`
 	ncli.Flag("server", "STHG-MS server urls").Short('s').Envar("STHG_URL").PlaceHolder("STHG_URL").StringVar(&opts.Servers)
 	ncli.Flag("user", "Username or Token").Envar("STHG_USER").PlaceHolder("STHG_USER").StringVar(&opts.Username)
 	ncli.Flag("password", "Password").Envar("STHG_PASSWORD").PlaceHolder("STHG_PASSWORD").StringVar(&opts.Password)
-	ncli.Flag("connection-name", "Nickname to use for the underlying STHG Connection").Default("STHG CLI Version " + version).PlaceHolder("NAME").StringVar(&opts.ConnectionName)
+	ncli.Flag("connection-name", "Nickname to use for the underlying STHG-MS Connection").Default("STHG-MS CLI Version " + version).PlaceHolder("NAME").StringVar(&opts.ConnectionName)
 	ncli.Flag("creds", "User credentials").Envar("STHG_CREDS").PlaceHolder("FILE").StringVar(&opts.Creds)
 	ncli.Flag("nkey", "User NKEY").Envar("STHG_NKEY").PlaceHolder("FILE").StringVar(&opts.Nkey)
 	ncli.Flag("tlscert", "TLS public certificate").Envar("STHG_CERT").PlaceHolder("FILE").ExistingFileVar(&opts.TlsCert)
