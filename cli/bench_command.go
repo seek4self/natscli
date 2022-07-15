@@ -71,35 +71,35 @@ func configureBenchCommand(app commandHost) {
 	c := &benchCmd{}
 
 	benchHelp := `
-Core NATS publish and subscribe:
+Core STHG-MS publish and subscribe:
 
-  nats bench benchsubject --pub 1 --sub 10
+  ms-client bench benchsubject --pub 1 --sub 10
 
 Request reply with queue group:
 
-  nats bench benchsubject --sub 1 --reply
+  ms-client bench benchsubject --sub 1 --reply
 
-  nats bench benchsubject --pub 10 --request
+  ms-client bench benchsubject --pub 10 --request
 
 JetStream publish:
 
-  nats bench benchsubject --js --purge --pub 1
+  ms-client bench benchsubject --js --purge --pub 1
 
 JetStream ordered ephemeral consumers:
 
-  nats bench benchsubject --js --sub 10
+  ms-client bench benchsubject --js --sub 10
 
 JetStream durable pull and push consumers:
 
-  nats bench benchsubject --js --sub 5 --pull
+  ms-client bench benchsubject --js --sub 5 --pull
 
-  nats bench benchsubject --js --sub 5 --push
+  ms-client bench benchsubject --js --sub 5 --push
 
 JetStream KV put and get:
 
-  nats bench benchsubject --kv --pub 1
+  ms-client bench benchsubject --kv --pub 1
 
-  nats bench benchsubject --kv --sub 10
+  ms-client bench benchsubject --kv --sub 10
 
 Remember to use --no-progress to measure performance more accurately
 `
@@ -213,11 +213,11 @@ func (c *benchCmd) bench(_ *fisk.ParseContext) error {
 		if c.request || c.reply {
 			log.Printf("Starting request-reply benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, request=%v, reply=%v, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", getSubscribeSubject(c), c.multiSubject, c.multiSubjectMax, c.request, c.reply, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
 		} else {
-			log.Printf("Starting Core NATS pub/sub benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", getSubscribeSubject(c), c.multiSubject, c.multiSubjectMax, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
+			log.Printf("Starting Core STHG-MS pub/sub benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", getSubscribeSubject(c), c.multiSubject, c.multiSubjectMax, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
 		}
 	}
 
-	bm := bench.NewBenchmark("NATS", c.numSubs, c.numPubs)
+	bm := bench.NewBenchmark("STHG-MS", c.numSubs, c.numPubs)
 
 	startwg := &sync.WaitGroup{}
 	donewg := &sync.WaitGroup{}
@@ -242,7 +242,7 @@ func (c *benchCmd) bench(_ *fisk.ParseContext) error {
 		// create the stream for the benchmark (and purge it)
 		nc, err := nats.Connect(opts.Config.ServerURL(), natsOpts()...)
 		if err != nil {
-			log.Fatalf("NATS connection failed: %v", err)
+			log.Fatalf("STHG-MS connection failed: %v", err)
 		}
 
 		js, err = nc.JetStream(nats.MaxWait(c.jsTimeout))

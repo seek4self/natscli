@@ -56,14 +56,14 @@ func configureActCommand(app commandHost) {
 	conns.Flag("top", "Limit results to the top results").Default("1000").IntVar(&c.topk)
 	conns.Flag("subject", "Limits responses only to those connections with matching subscription interest").StringVar(&c.subject)
 
-	backup := act.Command("backup", "Creates a backup of all  JetStream Streams over the NATS network").Alias("snapshot").Action(c.backupAction)
+	backup := act.Command("backup", "Creates a backup of all  JetStream Streams over the STHG-MS network").Alias("snapshot").Action(c.backupAction)
 	backup.Arg("target", "Directory to create the backup in").Required().StringVar(&c.backupDirectory)
 	backup.Flag("check", "Checks the Stream for health prior to backup").UnNegatableBoolVar(&c.healthCheck)
 	backup.Flag("consumers", "Enable or disable consumer backups").Default("true").UnNegatableBoolVar(&c.snapShotConsumers)
 	backup.Flag("force", "Perform backup without prompting").Short('f').UnNegatableBoolVar(&c.force)
 	backup.Flag("critical-warnings", "Treat warnings as failures").Short('w').UnNegatableBoolVar(&c.failOnWarn)
 
-	restore := act.Command("restore", "Restore an account backup over the NATS network").Action(c.restoreAction)
+	restore := act.Command("restore", "Restore an account backup over the STHG-MS network").Action(c.restoreAction)
 	restore.Arg("directory", "The directory holding the account backup to restore").Required().ExistingDirVar(&c.backupDirectory)
 	restore.Flag("cluster", "Place the stream in a specific cluster").StringVar(&c.placementCluster)
 	restore.Flag("tag", "Place the stream on servers that has specific tags (pass multiple times)").StringsVar(&c.placementTags)
