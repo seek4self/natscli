@@ -48,11 +48,11 @@ func configurePubCommand(app commandHost) {
 Body and Header values of the messages may use Go templates to 
 create unique messages.
 
-   nats pub test --count 10 "Message {{Count}} @ {{Time}}"
+   ms-client pub test --count 10 "Message {{Count}} @ {{Time}}"
 
 Multiple messages with random strings between 10 and 100 long:
 
-   nats pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
+   ms-client pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
 
 Available template functions are:
 
@@ -92,11 +92,11 @@ nats request destination.subject "hello world" -H "Content-type:text/plain" --ra
 Body and Header values of the messages may use Go templates to 
 create unique messages.
 
-   nats request test --count 10 "Message {{Count}} @ {{Time}}"
+   ms-client request test --count 10 "Message {{Count}} @ {{Time}}"
 
 Multiple messages with random strings between 10 and 100 long:
 
-   nats request test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
+   ms-client request test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
 
 Available template functions are:
 

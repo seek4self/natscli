@@ -101,38 +101,38 @@ func configureBenchCommand(app commandHost) {
 	bench.Flag("multisubjectmax", "The maximum number of subjects to use in multi-subject mode (0 means no max)").Default("0").IntVar(&c.multiSubjectMax)
 
 	cheats["bench"] = `# benchmark core nats publish and subscribe with 10 publishers and subscribers
-nats bench testsubject --pub 10 --sub 10 --msgs 10000 --size 512
+ms-client bench testsubject --pub 10 --sub 10 --msgs 10000 --size 512
 
 # benchmark core nats request-reply without subscribers using a queue
-nats bench testsubject --pub 1 --sub 1 --msgs 10000 --no-queue
+ms-client bench testsubject --pub 1 --sub 1 --msgs 10000 --no-queue
 
 # benchmark core nats request-reply with queuing
-nats bench testsubject --sub 4 --reply
-nats bench testsubject --pub 4 --request --msgs 20000
+ms-client bench testsubject --sub 4 --reply
+ms-client bench testsubject --pub 4 --request --msgs 20000
 
 # benchmark JetStream synchronously acknowledged publishing purging the data first
-nats bench testsubject --js --syncpub --pub 10  --msgs 10000 --purge
+ms-client bench testsubject --js --syncpub --pub 10  --msgs 10000 --purge
 
 # benchmark JS publish and push consumers at the same time purging the data first
-nats bench testsubject --js --pub 4 --sub 4 --purge
+ms-client bench testsubject --js --pub 4 --sub 4 --purge
 
 # benchmark JS stream purge and async batched publishing to the stream
-nats bench testsubject --js --pub 4 --purge
+ms-client bench testsubject --js --pub 4 --purge
 
 # benchmark JS stream get replay from the stream using a push consumer
-nats bench testsubject --js --sub 4
+ms-client bench testsubject --js --sub 4
 
 # benchmark JS stream get replay from the stream using a pull consumer
-nats bench testsubject --js --sub 4 --pull
+ms-client bench testsubject --js --sub 4 --pull
 
 # simulate a message processing time (for reply mode and pull JS consumers) of 50 microseconds
-nats bench testsubject --reply --sub 1 --acksleep 50us
+ms-client bench testsubject --reply --sub 1 --acksleep 50us
 
 # generate load by publishing messages at an interval of 100 nanoseconds rather than back to back
-nats bench testsubject --pub 1 --pubsleep 100ns
+ms-client bench testsubject --pub 1 --pubsleep 100ns
 
 # remember when benchmarking JetStream
-Once you are finished benchmarking, remember to free up the resources (i.e. memory and files) consumed by the stream using 'nats stream rm'
+Once you are finished benchmarking, remember to free up the resources (i.e. memory and files) consumed by the stream using 'ms-client stream rm'
 `
 }
 
@@ -210,11 +210,11 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 		if c.request || c.reply {
 			log.Printf("Starting request-reply benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, request=%v, reply=%v, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", c.subject, c.multiSubject, c.multiSubjectMax, c.request, c.reply, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
 		} else {
-			log.Printf("Starting Core NATS pub/sub benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", c.subject, c.multiSubject, c.multiSubjectMax, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
+			log.Printf("Starting Core STHG-MS pub/sub benchmark [subject=%s, multisubject=%v, multisubjectmax=%d, msgs=%s, msgsize=%s, pubs=%d, subs=%d, pubsleep=%v, subsleep=%v]", getSubscribeSubject(c), c.multiSubject, c.multiSubjectMax, humanize.Comma(int64(c.numMsg)), humanize.IBytes(uint64(c.msgSize)), c.numPubs, c.numSubs, c.pubSleep, c.subSleep)
 		}
 	}
 
-	bm := bench.NewBenchmark("NATS", c.numSubs, c.numPubs)
+	bm := bench.NewBenchmark("STHG-MS", c.numSubs, c.numPubs)
 
 	startwg := &sync.WaitGroup{}
 	donewg := &sync.WaitGroup{}
@@ -239,7 +239,7 @@ func (c *benchCmd) bench(_ *kingpin.ParseContext) error {
 		// create the stream for the benchmark (and purge it)
 		nc, err := nats.Connect(opts.Config.ServerURL(), natsOpts()...)
 		if err != nil {
-			log.Fatalf("NATS connection failed: %v", err)
+			log.Fatalf("STHG-MS connection failed: %v", err)
 		}
 
 		js, err = nc.JetStream(nats.MaxWait(c.jsTimeout))

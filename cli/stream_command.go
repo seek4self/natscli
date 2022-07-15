@@ -255,14 +255,14 @@ func configureStreamCommand(app commandHost) {
 	strGet.Flag("last-for", "Retrieves the message for a specific subject").Short('S').PlaceHolder("SUBJECT").StringVar(&c.filterSubject)
 	strGet.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
 
-	strBackup := str.Command("backup", "Creates a backup of a Stream over the NATS network").Alias("snapshot").Action(c.backupAction)
+	strBackup := str.Command("backup", "Creates a backup of a Stream over the STHG-MS network").Alias("snapshot").Action(c.backupAction)
 	strBackup.Arg("stream", "Stream to backup").Required().StringVar(&c.stream)
 	strBackup.Arg("target", "Directory to create the backup in").Required().StringVar(&c.backupDirectory)
 	strBackup.Flag("progress", "Enables or disables progress reporting using a progress bar").Default("true").BoolVar(&c.showProgress)
 	strBackup.Flag("check", "Checks the Stream for health prior to backup").Default("false").BoolVar(&c.healthCheck)
 	strBackup.Flag("consumers", "Enable or disable consumer backups").Default("true").BoolVar(&c.snapShotConsumers)
 
-	strRestore := str.Command("restore", "Restore a Stream over the NATS network").Action(c.restoreAction)
+	strRestore := str.Command("restore", "Restore a Stream over the STHG-MS network").Action(c.restoreAction)
 	strRestore.Arg("file", "The directory holding the backup to restore").Required().ExistingDirVar(&c.backupDirectory)
 	strRestore.Flag("progress", "Enables or disables progress reporting using a progress bar").Default("true").BoolVar(&c.showProgress)
 	strRestore.Flag("config", "Load a different configuration when restoring the stream").ExistingFileVar(&c.inputFile)

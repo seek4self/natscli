@@ -48,19 +48,19 @@ The "command" supports extracting some information from the subject the request 
 When the subject being listened on is "weather.>" a request on "weather.london" can extract
 the "london" part and use it in the command string:
 
-  nats reply 'weather.>' --command "curl -s wttr.in/{{1}}?format=3"
+  ms-client reply 'weather.>' --command "curl -s wttr.in/{{1}}?format=3"
 
 This will request the weather for london when invoked as:
 
-  nats request weather.london ''
+  ms-client request weather.london ''
 
 The body and Header values of the messages may use Go templates to create unique messages.
 
-   nats reply test "Message {{Count}} @ {{Time}}"
+   ms-client reply test "Message {{Count}} @ {{Time}}"
 
 Multiple messages with random strings between 10 and 100 long:
 
-   nats pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
+   ms-client pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
 
 Available template functions are:
 
