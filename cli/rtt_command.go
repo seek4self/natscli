@@ -52,7 +52,7 @@ func configureRTTCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("rtt", 13, configureRTTCommand)
+	// registerCommand("rtt", 13, configureRTTCommand)
 }
 
 func (c *rttCmd) rtt(_ *fisk.ParseContext) error {

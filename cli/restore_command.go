@@ -35,7 +35,7 @@ func configureRestoreCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("restore", 12, configureRestoreCommand)
+	// registerCommand("restore", 12, configureRestoreCommand)
 }
 
 func (c *restoreCmd) restoreAction(_ *fisk.ParseContext) error {

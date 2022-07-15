@@ -81,7 +81,7 @@ func configureCtxCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("context", 5, configureCtxCommand)
+	// registerCommand("context", 5, configureCtxCommand)
 }
 
 func (c *ctxCommand) hasOverrides() bool {

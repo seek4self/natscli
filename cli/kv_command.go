@@ -134,7 +134,7 @@ NOTE: This is an experimental feature.
 }
 
 func init() {
-	registerCommand("kv", 9, configureKVCommand)
+	// registerCommand("kv", 9, configureKVCommand)
 }
 
 func (c *kvCommand) parseLimitStrings(_ *fisk.ParseContext) (err error) {

@@ -30,5 +30,5 @@ func configureServerCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("server", 15, configureServerCommand)
+	// registerCommand("server", 15, configureServerCommand)
 }

@@ -82,7 +82,7 @@ NOTE: This is an experimental feature.
 }
 
 func init() {
-	registerCommand("governor", 8, configureGovernorCommand)
+	// registerCommand("governor", 8, configureGovernorCommand)
 }
 
 func (c *govCmd) rmAction(_ *fisk.ParseContext) error {

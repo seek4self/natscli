@@ -79,7 +79,7 @@ func configureTrafficCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("traffic", 18, configureTrafficCommand)
+	// registerCommand("traffic", 18, configureTrafficCommand)
 }
 
 func (c *trafficCmd) monitor(_ *fisk.ParseContext) error {

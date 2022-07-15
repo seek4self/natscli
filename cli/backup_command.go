@@ -33,7 +33,7 @@ func configureBackupCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("backup", 1, configureBackupCommand)
+	// registerCommand("backup", 1, configureBackupCommand)
 }
 
 func (c *backupCmd) backupAction(_ *fisk.ParseContext) error {

@@ -114,7 +114,7 @@ NOTE: This is an experimental feature.
 }
 
 func init() {
-	registerCommand("object", 10, configureObjectCommand)
+	// registerCommand("object", 10, configureObjectCommand)
 }
 
 func (c *objCommand) parseLimitStrings(_ *fisk.ParseContext) (err error) {

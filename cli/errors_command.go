@@ -48,7 +48,7 @@ func configureErrCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("errors", 6, configureErrCommand)
+	// registerCommand("errors", 6, configureErrCommand)
 }
 
 func (c *errCmd) validateAction(_ *fisk.ParseContext) error {

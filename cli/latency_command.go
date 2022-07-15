@@ -54,7 +54,7 @@ func configureLatencyCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("latency", 11, configureLatencyCommand)
+	// registerCommand("latency", 11, configureLatencyCommand)
 }
 
 func (c *latencyCmd) latencyAction(_ *fisk.ParseContext) error {

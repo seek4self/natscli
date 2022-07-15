@@ -23,5 +23,5 @@ func configureSchemaCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("schema", 14, configureSchemaCommand)
+	// registerCommand("schema", 14, configureSchemaCommand)
 }

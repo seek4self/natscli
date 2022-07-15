@@ -60,7 +60,7 @@ func configureEventsCommand(app commandHost) {
 }
 
 func init() {
-	registerCommand("events", 7, configureEventsCommand)
+	// registerCommand("events", 7, configureEventsCommand)
 }
 
 func (c *eventsCmd) handleNATSEvent(m *nats.Msg) {
