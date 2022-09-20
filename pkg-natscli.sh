@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 pkgDir=$(basename $1)
 prefix="natstool"

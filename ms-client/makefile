@@ -7,9 +7,10 @@ VERSION=0.0.1
 build:
 	${GC} build -ldflags '-X main.version=${VERSION} -s -w' -o ${RELEASE_DIR}/${APP_NAME} ${MAIN_GO_Dir}
 
-pkg :
+pkg: build
 	@echo "cp readme ..."
 	cp -f readme.md ${RELEASE_DIR}
+	cp -f install.sh ${RELEASE_DIR}
 
-clean :
+clean:
 	@if [ -d ${RELEASE_DIR} ] ; then rm -rf ${RELEASE_DIR}; fi
