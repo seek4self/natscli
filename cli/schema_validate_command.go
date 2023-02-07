@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,10 +16,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
-	"gopkg.in/alecthomas/kingpin.v2"
+	"github.com/choria-io/fisk"
 )
 
 type schemaValidateCmd struct {
@@ -28,22 +28,22 @@ type schemaValidateCmd struct {
 	json   bool
 }
 
-func configureSchemaValidateCommand(schema *kingpin.CmdClause) {
+func configureSchemaValidateCommand(schema *fisk.CmdClause) {
 	c := &schemaValidateCmd{}
 	validate := schema.Command("validate", "Validates a JSON file against a schema").Alias("check").Action(c.validate)
 	validate.Arg("schema", "Schema ID to validate against").Required().StringVar(&c.schema)
 	validate.Arg("file", "JSON data to validate").Required().StringVar(&c.file)
-	validate.Flag("json", "Produce JSON format output").BoolVar(&c.json)
+	validate.Flag("json", "Produce JSON format output").UnNegatableBoolVar(&c.json)
 
 }
 
-func (c *schemaValidateCmd) validate(_ *kingpin.ParseContext) error {
-	file, err := ioutil.ReadFile(c.file)
+func (c *schemaValidateCmd) validate(_ *fisk.ParseContext) error {
+	file, err := os.ReadFile(c.file)
 	if err != nil {
 		return err
 	}
 
-	var data interface{}
+	var data any
 	err = json.Unmarshal(file, &data)
 	if err != nil {
 		return fmt.Errorf("could not parse JSON data in %q: %s", c.file, err)

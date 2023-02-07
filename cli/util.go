@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"net/textproto"
@@ -37,6 +36,7 @@ import (
 	"unicode"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/gosuri/uiprogress"
 	"github.com/klauspost/compress/s2"
@@ -45,7 +45,6 @@ import (
 	"github.com/nats-io/nuid"
 	"github.com/xlab/tablewriter"
 	terminal "golang.org/x/term"
-	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/nats-io/jsm.go"
 
@@ -85,46 +84,6 @@ func selectConsumer(mgr *jsm.Manager, stream string, consumer string, force bool
 		}
 
 		return c, nil, nil
-	}
-}
-
-func selectStreamTemplate(mgr *jsm.Manager, template string, force bool) (string, error) {
-	if template != "" {
-		known, err := mgr.IsKnownStreamTemplate(template)
-		if err != nil {
-			return "", err
-		}
-
-		if known {
-			return template, nil
-		}
-	}
-
-	if force {
-		return "", fmt.Errorf("unknown template %q", template)
-	}
-
-	templates, err := mgr.StreamTemplateNames()
-	if err != nil {
-		return "", err
-	}
-
-	switch len(templates) {
-	case 0:
-		return "", errors.New("no Streams Templates are defined")
-	default:
-		s := ""
-
-		err = askOne(&survey.Select{
-			Message:  "Select a Stream Template",
-			Options:  templates,
-			PageSize: selectPageSize(len(templates)),
-		}, &s)
-		if err != nil {
-			return "", err
-		}
-
-		return s, nil
 	}
 }
 
@@ -180,7 +139,7 @@ func selectStream(mgr *jsm.Manager, stream string, force bool, all bool) (string
 	}
 }
 
-func askOne(p survey.Prompt, response interface{}, opts ...survey.AskOpt) error {
+func askOne(p survey.Prompt, response any, opts ...survey.AskOpt) error {
 	if !isTerminal() {
 		return fmt.Errorf("cannot prompt for user input without a terminal")
 	}
@@ -188,7 +147,7 @@ func askOne(p survey.Prompt, response interface{}, opts ...survey.AskOpt) error 
 	return survey.AskOne(p, response, opts...)
 }
 
-func toJSON(d interface{}) (string, error) {
+func toJSON(d any) (string, error) {
 	j, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return "", err
@@ -197,7 +156,7 @@ func toJSON(d interface{}) (string, error) {
 	return string(j), nil
 }
 
-func printJSON(d interface{}) error {
+func printJSON(d any) error {
 	j, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return err
@@ -209,56 +168,11 @@ func printJSON(d interface{}) error {
 }
 func parseDurationString(dstr string) (dur time.Duration, err error) {
 	dstr = strings.TrimSpace(dstr)
-
-	if len(dstr) <= 0 {
-		return dur, nil
+	if len(dstr) == 0 {
+		return 0, nil
 	}
 
-	ls := len(dstr)
-	di := ls - 1
-	unit := dstr[di:]
-
-	switch unit {
-	case "w", "W":
-		val, err := strconv.ParseFloat(dstr[:di], 32)
-		if err != nil {
-			return dur, err
-		}
-
-		dur = time.Duration(val*7*24) * time.Hour
-
-	case "d", "D":
-		val, err := strconv.ParseFloat(dstr[:di], 32)
-		if err != nil {
-			return dur, err
-		}
-
-		dur = time.Duration(val*24) * time.Hour
-	case "M":
-		val, err := strconv.ParseFloat(dstr[:di], 32)
-		if err != nil {
-			return dur, err
-		}
-
-		dur = time.Duration(val*24*30) * time.Hour
-	case "Y", "y":
-		val, err := strconv.ParseFloat(dstr[:di], 32)
-		if err != nil {
-			return dur, err
-		}
-
-		dur = time.Duration(val*24*365) * time.Hour
-	case "s", "S", "m", "h", "H":
-		dur, err = time.ParseDuration(dstr)
-		if err != nil {
-			return dur, err
-		}
-
-	default:
-		return dur, fmt.Errorf("invalid time unit %s", unit)
-	}
-
-	return dur, nil
+	return fisk.ParseDuration(dstr)
 }
 
 // calculates progress bar width for uiprogress:
@@ -387,13 +301,28 @@ func splitString(s string) []string {
 	})
 }
 
+func splitCLISubjects(subjects []string) []string {
+	new := []string{}
+
+	re := regexp.MustCompile(`,|\t|\s`)
+	for _, s := range subjects {
+		if re.MatchString(s) {
+			new = append(new, splitString(s)...)
+		} else {
+			new = append(new, s)
+		}
+	}
+
+	return new
+}
+
 func natsOpts() []nats.Option {
 	if opts.Config == nil {
 		return []nats.Option{}
 	}
 
 	copts, err := opts.Config.NATSOptions()
-	kingpin.FatalIfError(err, "configuration error")
+	fisk.FatalIfError(err, "configuration error")
 
 	connectionName := strings.TrimSpace(opts.ConnectionName)
 	if len(connectionName) == 0 {
@@ -420,6 +349,14 @@ func natsOpts() []nats.Option {
 			}
 		}),
 	}...)
+}
+
+func addCheat(name string, cmd *fisk.CmdClause) {
+	if opts.NoCheats {
+		return
+	}
+
+	cmd.CheatFile(fs, name, fmt.Sprintf("cheats/%s.md", name))
 }
 
 func newNatsConnUnlocked(servers string, copts ...nats.Option) (*nats.Conn, error) {
@@ -540,6 +477,7 @@ func prepareHelperUnlocked(servers string, copts ...nats.Option) (*nats.Conn, *j
 		jsopts = append(jsopts, jsm.WithTrace())
 	}
 
+	opts.Conn.NewRespInbox()
 	opts.Mgr, err = jsm.New(opts.Conn, jsopts...)
 	if err != nil {
 		return nil, nil, err
@@ -654,13 +592,14 @@ type pubData struct {
 	UnixNano  int64
 	TimeStamp string
 	Time      string
+	Request   string
 }
 
 func (p *pubData) ID() string {
 	return nuid.Next()
 }
 
-func pubReplyBodyTemplate(body string, ctr int) ([]byte, error) {
+func pubReplyBodyTemplate(body string, request string, ctr int) ([]byte, error) {
 	now := time.Now()
 	funcMap := template.FuncMap{
 		"Random":    randomString,
@@ -671,6 +610,10 @@ func pubReplyBodyTemplate(body string, ctr int) ([]byte, error) {
 		"TimeStamp": func() string { return now.Format(time.RFC3339) },
 		"Time":      func() string { return now.Format(time.Kitchen) },
 		"ID":        func() string { return nuid.Next() },
+	}
+
+	if request != "" {
+		funcMap["Request"] = func() string { return request }
 	}
 
 	templ, err := template.New("body").Funcs(funcMap).Parse(body)
@@ -686,6 +629,7 @@ func pubReplyBodyTemplate(body string, ctr int) ([]byte, error) {
 		UnixNano:  now.UnixNano(),
 		TimeStamp: now.Format(time.RFC3339),
 		Time:      now.Format(time.Kitchen),
+		Request:   request,
 	})
 	if err != nil {
 		return []byte(body), err
@@ -739,7 +683,7 @@ func parseStringsToHeader(hdrs []string, seq int) (nats.Header, error) {
 			return nil, fmt.Errorf("invalid header %q", hdr)
 		}
 
-		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), seq)
+		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), "", seq)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse Header template for %s: %s", parts[0], err)
 		}
@@ -757,7 +701,7 @@ func parseStringsToMsgHeader(hdrs []string, seq int, msg *nats.Msg) error {
 			return fmt.Errorf("invalid header %q", hdr)
 		}
 
-		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), seq)
+		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), "", seq)
 		if err != nil {
 			log.Printf("Failed to parse Header template for %s: %s", parts[0], err)
 			continue
@@ -793,7 +737,7 @@ func loadContext() error {
 
 	exist, _ := fileAccessible(opts.CfgCtx)
 
-	if exist {
+	if exist && strings.HasSuffix(opts.CfgCtx, ".json") {
 		opts.Config, err = natscontext.NewFromFile(opts.CfgCtx, ctxOpts...)
 	} else {
 		opts.Config, err = natscontext.New(opts.CfgCtx, !SkipContexts, ctxOpts...)
@@ -868,7 +812,7 @@ func renderCluster(cluster *api.ClusterInfo) string {
 	return strings.Join(compact, ", ")
 }
 
-func doReqAsync(req interface{}, subj string, waitFor int, nc *nats.Conn, cb func([]byte)) error {
+func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte)) error {
 	jreq := []byte("{}")
 	var err error
 
@@ -913,7 +857,7 @@ func doReqAsync(req interface{}, subj string, waitFor int, nc *nats.Conn, cb fun
 		compressed := false
 		if m.Header.Get("Content-Encoding") == "snappy" {
 			compressed = true
-			ud, err := ioutil.ReadAll(s2.NewReader(bytes.NewBuffer(data)))
+			ud, err := io.ReadAll(s2.NewReader(bytes.NewBuffer(data)))
 			if err != nil {
 				errs <- err
 				return
@@ -983,10 +927,10 @@ func doReqAsync(req interface{}, subj string, waitFor int, nc *nats.Conn, cb fun
 		log.Printf(">>> Received %d responses", ctr)
 	}
 
-	return err
+	return nil
 }
 
-func doReq(req interface{}, subj string, waitFor int, nc *nats.Conn) ([][]byte, error) {
+func doReq(req any, subj string, waitFor int, nc *nats.Conn) ([][]byte, error) {
 	res := [][]byte{}
 	mu := sync.Mutex{}
 
@@ -1187,4 +1131,30 @@ func parseStringAsBytes(s string) (int64, error) {
 	num *= 1 << mult
 
 	return num, nil
+}
+
+func sliceGroups(input []string, size int, fn func(group []string)) {
+	// how many to add
+	padding := size - (len(input) % size)
+
+	if padding != size {
+		p := []string{}
+
+		for i := 0; i <= padding; i++ {
+			p = append(p, "")
+		}
+
+		input = append(input, p...)
+	}
+
+	// how many chunks we're making
+	count := len(input) / size
+
+	for i := 0; i < count; i++ {
+		chunk := []string{}
+		for s := 0; s < size; s++ {
+			chunk = append(chunk, input[i+s*count])
+		}
+		fn(chunk)
+	}
 }

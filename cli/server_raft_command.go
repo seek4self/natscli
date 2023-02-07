@@ -17,11 +17,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats-server/v2/server"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type SrvRaftCmd struct {
@@ -31,21 +32,21 @@ type SrvRaftCmd struct {
 	placementCluster string
 }
 
-func configureServerRaftCommand(srv *kingpin.CmdClause) {
+func configureServerRaftCommand(srv *fisk.CmdClause) {
 	c := &SrvRaftCmd{}
 
 	raft := srv.Command("raft", "Manage JetStream Clustering").Alias("r")
-	raft.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+	raft.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 
 	sd := raft.Command("step-down", "Force a new leader election by standing down the current meta leader").Alias("stepdown").Alias("sd").Alias("elect").Alias("down").Alias("d").Action(c.metaLeaderStandDown)
 	sd.Flag("cluster", "Request placement of the leader in a specific cluster").StringVar(&c.placementCluster)
 
 	rm := raft.Command("peer-remove", "Removes a server from a JetStream cluster").Alias("rm").Alias("pr").Action(c.metaPeerRemove)
-	rm.Arg("name", "The Server Name to remove from the JetStream cluster").StringVar(&c.peer)
-	rm.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
+	rm.Arg("name", "The Server Name or ID to remove from the JetStream cluster").Required().StringVar(&c.peer)
+	rm.Flag("force", "Force removal without prompting").Short('f').UnNegatableBoolVar(&c.force)
 }
 
-func (c *SrvRaftCmd) metaPeerRemove(_ *kingpin.ParseContext) error {
+func (c *SrvRaftCmd) metaPeerRemove(_ *fisk.ParseContext) error {
 	nc, mgr, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -66,6 +67,9 @@ func (c *SrvRaftCmd) metaPeerRemove(_ *kingpin.ParseContext) error {
 	}
 
 	found := false
+	foundName := ""
+	foundID := ""
+
 	srv := &jszr{}
 	err = json.Unmarshal(res[0], srv)
 	if err != nil {
@@ -73,10 +77,12 @@ func (c *SrvRaftCmd) metaPeerRemove(_ *kingpin.ParseContext) error {
 	}
 
 	for _, r := range srv.Data.Meta.Replicas {
-		if r.Name == c.peer {
+		if r.Name == c.peer || r.Peer == c.peer {
 			if !r.Offline {
 				return fmt.Errorf("can only remove offline nodes")
 			}
+			foundID = r.Peer
+			foundName = r.Name
 			found = true
 		}
 	}
@@ -86,23 +92,32 @@ func (c *SrvRaftCmd) metaPeerRemove(_ *kingpin.ParseContext) error {
 	}
 
 	if !c.force {
-		fmt.Printf("Removing %s can not be reversed, data on this node will be\ninaccessible and another one called %s can not join again.\n\n", c.peer, c.peer)
+		fmt.Printf("Removing %s can not be reversed, data on this node will be inaccessible.\n\n", c.peer)
 
-		remove, err := askConfirmation(fmt.Sprintf("Really remove peer %s", c.peer), false)
-		kingpin.FatalIfError(err, "Could not prompt for confirmation")
+		var remove bool
+		if c.peer == foundName || strings.Contains(foundName, foundID) {
+			remove, err = askConfirmation(fmt.Sprintf("Really remove peer %s", foundName), false)
+		} else {
+			remove, err = askConfirmation(fmt.Sprintf("Really remove peer %s with id %s", foundName, foundID), false)
+		}
+		fisk.FatalIfError(err, "Could not prompt for confirmation")
 		if !remove {
 			fmt.Println("Removal canceled")
 			os.Exit(0)
 		}
 	}
 
-	err = mgr.MetaPeerRemove(c.peer)
-	kingpin.FatalIfError(err, "Could not remove %s", c.peer)
+	if foundID != "" {
+		err = mgr.MetaPeerRemove("", foundID)
+	} else {
+		err = mgr.MetaPeerRemove(foundName, foundID)
+	}
+	fisk.FatalIfError(err, "Could not remove %s", foundID)
 
 	return nil
 }
 
-func (c *SrvRaftCmd) metaLeaderStandDown(_ *kingpin.ParseContext) error {
+func (c *SrvRaftCmd) metaLeaderStandDown(_ *fisk.ParseContext) error {
 	nc, mgr, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err

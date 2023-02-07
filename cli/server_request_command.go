@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,9 +16,9 @@ package cli
 import (
 	"fmt"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type SrvRequestCmd struct {
@@ -47,9 +47,12 @@ type SrvRequestCmd struct {
 	accountFilter string
 	subjectFilter string
 	nameFilter    string
+
+	jsServerOnly bool
+	jsEnabled    bool
 }
 
-func configureServerRequestCommand(srv *kingpin.CmdClause) {
+func configureServerRequestCommand(srv *fisk.CmdClause) {
 	c := &SrvRequestCmd{}
 
 	req := srv.Command("request", "Request monitoring data from a specific server").Alias("req")
@@ -62,7 +65,7 @@ func configureServerRequestCommand(srv *kingpin.CmdClause) {
 
 	subz := req.Command("subscriptions", "Show subscription information").Alias("sub").Alias("subsz").Action(c.subs)
 	subz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
-	subz.Flag("detail", "Include detail about all subscriptions").Default("false").BoolVar(&c.detail)
+	subz.Flag("detail", "Include detail about all subscriptions").UnNegatableBoolVar(&c.detail)
 	subz.Flag("filter-account", "Filter on a specific account").StringVar(&c.accountFilter)
 
 	varz := req.Command("variables", "Show runtime variables").Alias("var").Alias("varz").Action(c.varz)
@@ -71,7 +74,7 @@ func configureServerRequestCommand(srv *kingpin.CmdClause) {
 	connz := req.Command("connections", "Show connection details").Alias("conn").Alias("connz").Action(c.conns)
 	connz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
 	connz.Flag("sort", "Sort by a specific property").Default("cid").EnumVar(&c.sortOpt, "cid", "start", "subs", "pending", "msgs_to", "msgs_from", "bytes_to", "bytes_from", "last", "idle", "uptime", "stop", "reason")
-	connz.Flag("subscriptions", "Show subscriptions").Default("false").BoolVar(&c.detail)
+	connz.Flag("subscriptions", "Show subscriptions").UnNegatableBoolVar(&c.detail)
 	connz.Flag("filter-cid", "Filter on a specific CID").Uint64Var(&c.cidFilter)
 	connz.Flag("filter-state", "Filter on a specific account state (open, closed, all)").Default("open").EnumVar(&c.stateFilter, "open", "closed", "all")
 	connz.Flag("filter-user", "Filter on a specific username").StringVar(&c.userFilter)
@@ -80,17 +83,17 @@ func configureServerRequestCommand(srv *kingpin.CmdClause) {
 
 	routez := req.Command("routes", "Show route details").Alias("route").Alias("routez").Action(c.routez)
 	routez.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
-	routez.Flag("subscriptions", "Show subscription detail").Default("false").BoolVar(&c.detail)
+	routez.Flag("subscriptions", "Show subscription detail").UnNegatableBoolVar(&c.detail)
 
 	gwyz := req.Command("gateways", "Show gateway details").Alias("gateway").Alias("gwy").Alias("gatewayz").Action(c.gwyz)
 	gwyz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
 	gwyz.Arg("filter-name", "Filter results on gateway name").StringVar(&c.nameFilter)
 	gwyz.Flag("filter-account", "Show only a certain account in account detail").StringVar(&c.accountFilter)
-	gwyz.Flag("accounts", "Show account detail").Default("false").BoolVar(&c.detail)
+	gwyz.Flag("accounts", "Show account detail").UnNegatableBoolVar(&c.detail)
 
 	leafz := req.Command("leafnodes", "Show leafnode details").Alias("leaf").Alias("leafz").Action(c.leafz)
 	leafz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
-	leafz.Flag("subscriptions", "Show subscription detail").Default("false").BoolVar(&c.detail)
+	leafz.Flag("subscriptions", "Show subscription detail").UnNegatableBoolVar(&c.detail)
 
 	accountz := req.Command("accounts", "Show account details").Alias("accountz").Alias("acct").Action(c.accountz)
 	accountz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
@@ -99,15 +102,42 @@ func configureServerRequestCommand(srv *kingpin.CmdClause) {
 	jsz := req.Command("jetstream", "Show JetStream details").Alias("jsz").Alias("js").Action(c.jsz)
 	jsz.Arg("wait", "Wait for a certain number of responses").Uint32Var(&c.waitFor)
 	jsz.Flag("account", "Show statistics scoped to a specific account").StringVar(&c.account)
-	jsz.Flag("accounts", "Include details about accounts").BoolVar(&c.includeAccounts)
-	jsz.Flag("streams", "Include details about Streams").BoolVar(&c.includeStreams)
-	jsz.Flag("consumer", "Include details about Consumers").BoolVar(&c.includeConsumers)
-	jsz.Flag("config", "Include details about configuration").BoolVar(&c.includeConfig)
-	jsz.Flag("leader", "Request a response from the Meta-group leader only").BoolVar(&c.leaderOnly)
-	jsz.Flag("all", "Include accounts, streams, consumers and configuration").BoolVar(&c.includeAll)
+	jsz.Flag("accounts", "Include details about accounts").UnNegatableBoolVar(&c.includeAccounts)
+	jsz.Flag("streams", "Include details about Streams").UnNegatableBoolVar(&c.includeStreams)
+	jsz.Flag("consumer", "Include details about Consumers").UnNegatableBoolVar(&c.includeConsumers)
+	jsz.Flag("config", "Include details about configuration").UnNegatableBoolVar(&c.includeConfig)
+	jsz.Flag("leader", "Request a response from the Meta-group leader only").UnNegatableBoolVar(&c.leaderOnly)
+	jsz.Flag("all", "Include accounts, streams, consumers and configuration").UnNegatableBoolVar(&c.includeAll)
+
+	healthz := req.Command("jetstream-health", "Request JetStream health status").Alias("healthz").Action(c.healthz)
+	healthz.Flag("js-enabled", "Checks that JetStream should be enabled on all servers").Short('J').BoolVar(&c.jsEnabled)
+	healthz.Flag("server-only", "Restricts the health check to the JetStream server only, do not check streams and consumers").Short('S').BoolVar(&c.jsServerOnly)
 }
 
-func (c *SrvRequestCmd) jsz(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) healthz(_ *fisk.ParseContext) error {
+	nc, _, err := prepareHelper("", natsOpts()...)
+	if err != nil {
+		return err
+	}
+
+	opts := server.HealthzEventOptions{
+		HealthzOptions:     server.HealthzOptions{JSEnabled: c.jsEnabled, JSServerOnly: c.jsServerOnly},
+		EventFilterOptions: c.reqFilter(),
+	}
+
+	res, err := c.doReq("HEALTHZ", &opts, nc)
+	if err != nil {
+		return err
+	}
+
+	for _, m := range res {
+		fmt.Println(string(m))
+	}
+
+	return nil
+}
+
+func (c *SrvRequestCmd) jsz(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -144,16 +174,20 @@ func (c *SrvRequestCmd) jsz(_ *kingpin.ParseContext) error {
 }
 
 func (c *SrvRequestCmd) reqFilter() server.EventFilterOptions {
-	return server.EventFilterOptions{
+	opt := server.EventFilterOptions{
 		Name:    c.name,
 		Host:    c.host,
 		Cluster: c.cluster,
 		Tags:    c.tags,
-		Domain:  opts.Config.JSDomain(),
 	}
+	if opts.Config != nil {
+		opt.Domain = opts.Config.JSDomain()
+	}
+
+	return opt
 }
 
-func (c *SrvRequestCmd) accountz(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) accountz(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -176,7 +210,7 @@ func (c *SrvRequestCmd) accountz(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvRequestCmd) leafz(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) leafz(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -199,7 +233,7 @@ func (c *SrvRequestCmd) leafz(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvRequestCmd) gwyz(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) gwyz(_ *fisk.ParseContext) error {
 	if c.accountFilter != "" {
 		c.detail = true
 	}
@@ -230,7 +264,7 @@ func (c *SrvRequestCmd) gwyz(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvRequestCmd) routez(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) routez(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -256,7 +290,7 @@ func (c *SrvRequestCmd) routez(_ *kingpin.ParseContext) error {
 	return nil
 
 }
-func (c *SrvRequestCmd) conns(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) conns(_ *fisk.ParseContext) error {
 	opts := &server.ConnzEventOptions{
 		ConnzOptions: server.ConnzOptions{
 			Sort:                server.SortOpt(c.sortOpt),
@@ -300,7 +334,7 @@ func (c *SrvRequestCmd) conns(_ *kingpin.ParseContext) error {
 
 }
 
-func (c *SrvRequestCmd) varz(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) varz(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -324,7 +358,7 @@ func (c *SrvRequestCmd) varz(_ *kingpin.ParseContext) error {
 
 }
 
-func (c *SrvRequestCmd) subs(_ *kingpin.ParseContext) error {
+func (c *SrvRequestCmd) subs(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -353,6 +387,6 @@ func (c *SrvRequestCmd) subs(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvRequestCmd) doReq(kind string, req interface{}, nc *nats.Conn) ([][]byte, error) {
+func (c *SrvRequestCmd) doReq(kind string, req any, nc *nats.Conn) ([][]byte, error) {
 	return doReq(req, fmt.Sprintf("$SYS.REQ.SERVER.PING.%s", kind), int(c.waitFor), nc)
 }

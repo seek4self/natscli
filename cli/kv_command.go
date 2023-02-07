@@ -14,8 +14,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -23,32 +24,39 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type kvCommand struct {
-	bucket              string
-	key                 string
-	val                 string
-	raw                 bool
-	history             uint64
-	ttl                 time.Duration
-	replicas            uint
-	force               bool
-	maxValueSize        int64
-	maxValueSizeString  string
-	maxBucketSize       int64
-	maxBucketSizeString string
-	revision            uint64
-	description         string
-	listNames           bool
-	storage             string
-	placementCluster    string
-	placementTags       []string
+	bucket                string
+	key                   string
+	val                   string
+	raw                   bool
+	history               uint64
+	ttl                   time.Duration
+	replicas              uint
+	force                 bool
+	maxValueSize          int64
+	maxValueSizeString    string
+	maxBucketSize         int64
+	maxBucketSizeString   string
+	revision              uint64
+	description           string
+	listNames             bool
+	lsVerbose             bool
+	lsVerboseDisplayValue bool
+	storage               string
+	placementCluster      string
+	placementTags         []string
+	repubSource           string
+	repubDest             string
+	repubHeadersOnly      bool
+	mirror                string
+	mirrorDomain          string
 }
 
 func configureKVCommand(app commandHost) {
@@ -58,25 +66,28 @@ func configureKVCommand(app commandHost) {
 
 The JetStream Key-Value store uses streams to store key-value pairs
 for an indefinite period or a per-bucket configured TTL.
-
-The Key-Value store supports read-after-write safety.
-
-NOTE: This is an experimental feature.
 `
 
 	kv := app.Command("kv", help)
+	addCheat("kv", kv)
 
 	add := kv.Command("add", "Adds a new KV Store Bucket").Alias("new").Action(c.addAction)
 	add.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	add.Flag("history", "How many historic values to keep per key").Default("1").Uint64Var(&c.history)
 	add.Flag("ttl", "How long to keep values for").DurationVar(&c.ttl)
 	add.Flag("replicas", "How many replicas of the data to store").Default("1").UintVar(&c.replicas)
-	add.Flag("max-value-size", "Maximum size for any single value").StringVar(&c.maxValueSizeString)
-	add.Flag("max-bucket-size", "Maximum size for the bucket").StringVar(&c.maxBucketSizeString)
+	add.Flag("max-value-size", "Maximum size for any single value").PlaceHolder("BYTES").StringVar(&c.maxValueSizeString)
+	add.Flag("max-bucket-size", "Maximum size for the bucket").PlaceHolder("BYTES").StringVar(&c.maxBucketSizeString)
 	add.Flag("description", "A description for the bucket").StringVar(&c.description)
 	add.Flag("storage", "Storage backend to use (file, memory)").EnumVar(&c.storage, "file", "f", "memory", "m")
 	add.Flag("tags", "Place the bucket on servers that has specific tags").StringsVar(&c.placementTags)
 	add.Flag("cluster", "Place the bucket on a specific cluster").StringVar(&c.placementCluster)
+	add.Flag("republish-source", "Republish messages to --republish-destination").PlaceHolder("SRC").StringVar(&c.repubSource)
+	add.Flag("republish-destination", "Republish destination for messages in --republish-source").PlaceHolder("DEST").StringVar(&c.repubDest)
+	add.Flag("republish-headers", "Republish only message headers, no bodies").UnNegatableBoolVar(&c.repubHeadersOnly)
+	add.Flag("mirror", "Creates a mirror of a different bucket").StringVar(&c.mirror)
+	add.Flag("mirror-domain", "When mirroring find the bucket in a different domain").StringVar(&c.mirrorDomain)
+
 	add.PreAction(c.parseLimitStrings)
 
 	put := kv.Command("put", "Puts a value into a key").Action(c.putAction)
@@ -87,7 +98,8 @@ NOTE: This is an experimental feature.
 	get := kv.Command("get", "Gets a value for a key").Action(c.getAction)
 	get.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	get.Arg("key", "The key to act on").Required().StringVar(&c.key)
-	get.Flag("raw", "Show only the value string").BoolVar(&c.raw)
+	get.Flag("revision", "Gets a specific revision").Uint64Var(&c.revision)
+	get.Flag("raw", "Show only the value string").UnNegatableBoolVar(&c.raw)
 
 	create := kv.Command("create", "Puts a value into a key only if the key is new or it's last operation was a delete").Action(c.createAction)
 	create.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
@@ -103,16 +115,22 @@ NOTE: This is an experimental feature.
 	del := kv.Command("del", "Deletes a key or the entire bucket").Alias("rm").Action(c.deleteAction)
 	del.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	del.Arg("key", "The key to act on").StringVar(&c.key)
-	del.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
+	del.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
 	purge := kv.Command("purge", "Deletes a key from the bucket, clearing history before creating a delete marker").Action(c.purgeAction)
 	purge.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	purge.Arg("key", "The key to act on").Required().StringVar(&c.key)
-	purge.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
+	purge.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
 	history := kv.Command("history", "Shows the full history for a key").Action(c.historyAction)
 	history.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	history.Arg("key", "The key to act on").Required().StringVar(&c.key)
+
+	revert := kv.Command("revert", "Reverts a value to a previous revision using put").Action(c.revertAction)
+	revert.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
+	revert.Arg("key", "The key to act on").Required().StringVar(&c.key)
+	revert.Arg("revision", "The revision to revert to").Required().Uint64Var(&c.revision)
+	revert.Flag("force", "Force reverting without prompting").BoolVar(&c.force)
 
 	status := kv.Command("info", "View the status of a KV store").Alias("view").Alias("status").Action(c.infoAction)
 	status.Arg("bucket", "The bucket to act on").StringVar(&c.bucket)
@@ -121,54 +139,22 @@ NOTE: This is an experimental feature.
 	watch.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	watch.Arg("key", "The key to act on").Default(">").StringVar(&c.key)
 
-	ls := kv.Command("ls", "List available Buckets").Alias("list").Action(c.lsAction)
-	ls.Flag("names", "Show just the bucket names").Short('n').BoolVar(&c.listNames)
+	ls := kv.Command("ls", "List available buckets or the keys in a bucket").Alias("list").Action(c.lsAction)
+	ls.Arg("bucket", "The bucket to list the keys").StringVar(&c.bucket)
+	ls.Flag("names", "Show just the bucket names").Short('n').UnNegatableBoolVar(&c.listNames)
+	ls.Flag("verbose", "Show detailed info about the key").Short('v').UnNegatableBoolVar(&c.lsVerbose)
+	ls.Flag("display-value", "Display value in verbose output (has no effect without 'verbose')").UnNegatableBoolVar(&c.lsVerboseDisplayValue)
 
 	rmHistory := kv.Command("compact", "Removes all historic values from the store where the last value is a delete").Action(c.compactAction)
 	rmHistory.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
-	rmHistory.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
-
-	upgrade := kv.Command("upgrade", "Upgrades a early tech-preview bucket to current format").Action(c.upgradeAction)
-	upgrade.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
-
-	cheats["kv"] = `# to create a replicated KV bucket
-nats kv add CONFIG --replicas 3
-
-# to store a value in the bucket
-nats kv put CONFIG username bob
-
-# to read just the value with no additional details
-nats kv get CONFIG username --raw
-
-# view an audit trail for a key if history is kept
-nats kv history CONFIG username
-
-# to see the bucket status
-nats kv status CONFIG
-
-# observe real time changes for an entire bucket
-nats kv watch CONFIG
-# observe real time changes for all keys below users
-nats kv watch CONFIG 'users.>''
-
-# create a bucket backup for CONFIG into backups/CONFIG
-nats kv status CONFIG
-nats stream backup <stream name> backups/CONFIG
-
-# restore a bucket from a backup
-nats stream restore <stream name> backups/CONFIG
-
-# list known buckets
-nats kv ls
-`
-
+	rmHistory.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 }
 
 func init() {
 	registerCommand("kv", 9, configureKVCommand)
 }
 
-func (c *kvCommand) parseLimitStrings(_ *kingpin.ParseContext) (err error) {
+func (c *kvCommand) parseLimitStrings(_ *fisk.ParseContext) (err error) {
 	if c.maxValueSizeString != "" {
 		c.maxValueSize, err = parseStringAsBytes(c.maxValueSizeString)
 		if err != nil {
@@ -199,14 +185,95 @@ func (c *kvCommand) strForOp(op nats.KeyValueOp) string {
 	}
 }
 
-func (c *kvCommand) lsAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) lsAction(_ *fisk.ParseContext) error {
+	if c.bucket != "" {
+		return c.lsBucketKeys()
+	}
+
+	return c.lsBuckets()
+}
+
+func (c *kvCommand) lsBucketKeys() error {
+	_, js, err := prepareJSHelper()
+	if err != nil {
+		return fmt.Errorf("unable to prepare js helper: %s", err)
+	}
+
+	kv, err := js.KeyValue(c.bucket)
+	if err != nil {
+		return fmt.Errorf("unable to load bucket: %s", err)
+	}
+
+	keys, err := kv.Keys()
+	if err != nil {
+		if err == nats.ErrNoKeysFound {
+			fmt.Println("No keys found in bucket")
+			return nil
+		}
+
+		return fmt.Errorf("unable to fetch keys in bucket: %s", err)
+	}
+
+	if c.lsVerbose {
+		if err := c.displayKeyInfo(kv, keys); err != nil {
+			return fmt.Errorf("unable to display key info: %s", err)
+		}
+	} else {
+		for _, v := range keys {
+			fmt.Println(v)
+		}
+	}
+
+	return nil
+}
+
+func (c *kvCommand) displayKeyInfo(kv nats.KeyValue, keys []string) error {
+	if kv == nil {
+		return errors.New("key value cannot be nil")
+	}
+
+	table := newTableWriter(fmt.Sprintf("Contents for bucket '%s'", c.bucket))
+
+	if c.lsVerboseDisplayValue {
+		table.AddHeaders("Key", "Created", "Delta", "Revision", "Value")
+	} else {
+		table.AddHeaders("Key", "Created", "Delta", "Revision")
+	}
+
+	for _, keyName := range keys {
+		kve, err := kv.Get(keyName)
+		if err != nil {
+			return fmt.Errorf("unable to fetch key %s: %s", keyName, err)
+		}
+
+		row := []interface{}{
+			kve.Key(),
+			kve.Created().Format("2006-01-02 15:04:05"),
+			kve.Delta(),
+			kve.Revision(),
+		}
+
+		if c.lsVerboseDisplayValue {
+			row = append(row, string(kve.Value()))
+		}
+
+		table.AddRow(row...)
+	}
+
+	fmt.Println(table.Render())
+
+	return nil
+}
+
+func (c *kvCommand) lsBuckets() error {
 	_, mgr, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
 	}
 
 	var found []*jsm.Stream
-	err = mgr.EachStream(func(s *jsm.Stream) {
+
+	err = mgr.EachStream(nil, func(s *jsm.Stream) {
 		if s.IsKVBucket() {
 			found = append(found, s)
 		}
@@ -247,41 +314,40 @@ func (c *kvCommand) lsAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *kvCommand) upgradeAction(_ *kingpin.ParseContext) error {
-	_, js, store, err := c.loadBucket()
+func (c *kvCommand) revertAction(pc *fisk.ParseContext) error {
+	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
 	}
 
-	status, err := store.Status()
+	rev, err := store.GetRevision(c.key, c.revision)
 	if err != nil {
 		return err
 	}
 
-	nfo := status.(*nats.KeyValueBucketStatus).StreamInfo()
-	if nfo.Config.AllowRollup && nfo.Config.Discard == nats.DiscardNew {
-		fmt.Println("Bucket is already using the correct configuration")
-		os.Exit(1)
+	if !c.force {
+		val := base64IfNotPrintable(rev.Value())
+		if len(val) > 40 {
+			val = fmt.Sprintf("%s...%s", val[0:15], val[len(val)-15:])
+		}
+
+		fmt.Printf("Revision: %d\n\n%v\n\n", rev.Revision(), val)
+		ok, err := askConfirmation(fmt.Sprintf("Really revert to revision %d", c.revision), false)
+		fisk.FatalIfError(err, "could not obtain confirmation")
+		if !ok {
+			return nil
+		}
 	}
 
-	nfo.Config.AllowRollup = true
-	nfo.Config.Discard = nats.DiscardNew
-	nfo, err = js.UpdateStream(&nfo.Config)
+	_, err = store.Put(c.key, rev.Value())
 	if err != nil {
 		return err
 	}
 
-	if !nfo.Config.AllowRollup || nfo.Config.Discard != nats.DiscardNew {
-		fmt.Printf("Configuration upgrade failed, please edit stream %s to allow RollUps and have Discard Policy of New", nfo.Config.Name)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Bucket %s has been upgraded\n\n", status.Bucket())
-
-	return c.showStatus(store)
+	return c.historyAction(pc)
 }
 
-func (c *kvCommand) historyAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) historyAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -308,7 +374,7 @@ func (c *kvCommand) historyAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *kvCommand) compactAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) compactAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -329,7 +395,7 @@ func (c *kvCommand) compactAction(_ *kingpin.ParseContext) error {
 	return store.PurgeDeletes()
 }
 
-func (c *kvCommand) deleteAction(pc *kingpin.ParseContext) error {
+func (c *kvCommand) deleteAction(pc *fisk.ParseContext) error {
 	if c.key == "" {
 		return c.rmBucketAction(pc)
 	}
@@ -354,7 +420,7 @@ func (c *kvCommand) deleteAction(pc *kingpin.ParseContext) error {
 	return store.Delete(c.key)
 }
 
-func (c *kvCommand) addAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) addAction(_ *fisk.ParseContext) error {
 	_, js, err := prepareJSHelper()
 	if err != nil {
 		return err
@@ -370,7 +436,7 @@ func (c *kvCommand) addAction(_ *kingpin.ParseContext) error {
 		placement.Tags = c.placementTags
 	}
 
-	store, err := js.CreateKeyValue(&nats.KeyValueConfig{
+	cfg := &nats.KeyValueConfig{
 		Bucket:       c.bucket,
 		Description:  c.description,
 		MaxValueSize: int32(c.maxValueSize),
@@ -380,7 +446,24 @@ func (c *kvCommand) addAction(_ *kingpin.ParseContext) error {
 		Storage:      storage,
 		Replicas:     int(c.replicas),
 		Placement:    placement,
-	})
+	}
+
+	if c.repubSource != "" && c.repubDest != "" {
+		cfg.RePublish = &nats.RePublish{
+			Source:      c.repubSource,
+			Destination: c.repubDest,
+			HeadersOnly: c.repubHeadersOnly,
+		}
+	}
+
+	if c.mirror != "" {
+		cfg.Mirror = &nats.StreamSource{
+			Name:   c.mirror,
+			Domain: c.mirrorDomain,
+		}
+	}
+
+	store, err := js.CreateKeyValue(cfg)
 	if err != nil {
 		return err
 	}
@@ -388,13 +471,18 @@ func (c *kvCommand) addAction(_ *kingpin.ParseContext) error {
 	return c.showStatus(store)
 }
 
-func (c *kvCommand) getAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) getAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
 	}
 
-	res, err := store.Get(c.key)
+	var res nats.KeyValueEntry
+	if c.revision > 0 {
+		res, err = store.GetRevision(c.key, c.revision)
+	} else {
+		res, err = store.Get(c.key)
+	}
 	if err != nil {
 		return err
 	}
@@ -420,7 +508,7 @@ func (c *kvCommand) getAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *kvCommand) putAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) putAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -441,7 +529,7 @@ func (c *kvCommand) putAction(_ *kingpin.ParseContext) error {
 	return err
 }
 
-func (c *kvCommand) createAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) createAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -462,7 +550,7 @@ func (c *kvCommand) createAction(_ *kingpin.ParseContext) error {
 	return err
 }
 
-func (c *kvCommand) updateAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) updateAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -488,7 +576,7 @@ func (c *kvCommand) valOrReadVal() ([]byte, error) {
 		return []byte(c.val), nil
 	}
 
-	return ioutil.ReadAll(os.Stdin)
+	return io.ReadAll(os.Stdin)
 }
 
 func (c *kvCommand) loadBucket() (*nats.Conn, nats.JetStreamContext, nats.KeyValue, error) {
@@ -546,7 +634,7 @@ func (c *kvCommand) knownBuckets(nc *nats.Conn) ([]string, error) {
 	return found, nil
 }
 
-func (c *kvCommand) infoAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) infoAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -555,7 +643,7 @@ func (c *kvCommand) infoAction(_ *kingpin.ParseContext) error {
 	return c.showStatus(store)
 }
 
-func (c *kvCommand) watchAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) watchAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -585,7 +673,7 @@ func (c *kvCommand) watchAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *kvCommand) purgeAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) purgeAction(_ *fisk.ParseContext) error {
 	_, _, store, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -606,7 +694,7 @@ func (c *kvCommand) purgeAction(_ *kingpin.ParseContext) error {
 	return store.Purge(c.key)
 }
 
-func (c *kvCommand) rmBucketAction(_ *kingpin.ParseContext) error {
+func (c *kvCommand) rmBucketAction(_ *fisk.ParseContext) error {
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Deleted bucket %s?", c.bucket), false)
 		if err != nil {
@@ -647,30 +735,55 @@ func (c *kvCommand) showStatus(store nats.KeyValue) error {
 	fmt.Println()
 	fmt.Println("Configuration:")
 	fmt.Println()
-	fmt.Printf("         Bucket Name: %s\n", status.Bucket())
-	fmt.Printf("        History Kept: %d\n", status.History())
-	fmt.Printf("       Values Stored: %d\n", status.Values())
-	fmt.Printf("  Backing Store Kind: %s\n", status.BackingStore())
+	fmt.Printf("          Bucket Name: %s\n", status.Bucket())
+	fmt.Printf("         History Kept: %s\n", humanize.Comma(status.History()))
+	fmt.Printf("        Values Stored: %s\n", humanize.Comma(int64(status.Values())))
+	fmt.Printf("   Backing Store Kind: %s\n", status.BackingStore())
 
 	if nfo != nil {
 		if nfo.Config.Description != "" {
-			fmt.Printf("         Description: %s\n", nfo.Config.Description)
+			fmt.Printf("          Description: %s\n", nfo.Config.Description)
 		}
+		fmt.Printf("          Bucket Size: %s\n", humanize.IBytes(nfo.State.Bytes))
 		if nfo.Config.MaxBytes == -1 {
-			fmt.Printf(" Maximum Bucket Size: unlimited\n")
+			fmt.Printf("  Maximum Bucket Size: unlimited\n")
 		} else {
-			fmt.Printf(" Maximum Bucket Size: %d\n", nfo.Config.MaxBytes)
+			fmt.Printf("  Maximum Bucket Size: %s\n", humanize.IBytes(uint64(nfo.Config.MaxBytes)))
 		}
-		if nfo.Config.MaxBytes == -1 {
-			fmt.Printf("  Maximum Value Size: unlimited\n")
+		if nfo.Config.MaxMsgSize == -1 {
+			fmt.Printf("   Maximum Value Size: unlimited\n")
 		} else {
-			fmt.Printf("  Maximum Value Size: %d\n", nfo.Config.MaxMsgSize)
+			fmt.Printf("   Maximum Value Size: %s\n", humanize.IBytes(uint64(nfo.Config.MaxMsgSize)))
 		}
-		fmt.Printf("    JetStream Stream: %s\n", nfo.Config.Name)
-		fmt.Printf("             Storage: %s\n", nfo.Config.Storage.String())
+		fmt.Printf("     JetStream Stream: %s\n", nfo.Config.Name)
+		fmt.Printf("              Storage: %s\n", nfo.Config.Storage.String())
+		if nfo.Config.RePublish != nil {
+			if nfo.Config.RePublish.HeadersOnly {
+				fmt.Printf(" Republishing Headers: %s to %s", nfo.Config.RePublish.Source, nfo.Config.RePublish.Destination)
+			} else {
+				fmt.Printf("         Republishing: %s to %s", nfo.Config.RePublish.Source, nfo.Config.RePublish.Destination)
+			}
+		}
 
+		if nfo.Mirror != nil {
+			s := nfo.Mirror
+			fmt.Println("\n  Mirror Information:")
+			fmt.Println()
+			fmt.Printf("        Origin Bucket: %s\n", strings.TrimPrefix(s.Name, "KV_"))
+			if s.External != nil {
+				fmt.Printf("         External API: %v\n", s.External.APIPrefix)
+			}
+			if s.Active > 0 && s.Active < math.MaxInt64 {
+				fmt.Printf("            Last Seen: %v\n", humanizeDuration(s.Active))
+			} else {
+				fmt.Printf("     	   Last Seen: never\n")
+			}
+			fmt.Printf("                  Lag: %s\n", humanize.Comma(int64(s.Lag)))
+
+			fmt.Println()
+		}
 		if nfo.Cluster != nil {
-			fmt.Println("\nCluster Information:")
+			fmt.Println("\n  Cluster Information:")
 			fmt.Println()
 			renderNatsGoClusterInfo(nfo)
 			fmt.Println()

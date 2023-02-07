@@ -15,14 +15,21 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
+	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/jsm.go/api"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type actCmd struct {
@@ -34,6 +41,7 @@ type actCmd struct {
 	healthCheck       bool
 	snapShotConsumers bool
 	force             bool
+	failOnWarn        bool
 
 	placementCluster string
 	placementTags    []string
@@ -42,6 +50,7 @@ type actCmd struct {
 func configureActCommand(app commandHost) {
 	c := &actCmd{}
 	act := app.Command("account", "Account information and status").Alias("a")
+	addCheat("account", act)
 	act.Command("info", "Account information").Alias("nfo").Action(c.infoAction)
 
 	report := act.Command("report", "Report on account metrics").Alias("rep")
@@ -51,39 +60,32 @@ func configureActCommand(app commandHost) {
 	conns.Flag("top", "Limit results to the top results").Default("1000").IntVar(&c.topk)
 	conns.Flag("subject", "Limits responses only to those connections with matching subscription interest").StringVar(&c.subject)
 
+	report.Command("statistics", "Report on server statistics").Alias("stats").Alias("statsz").Action(c.reportServerStats)
+
 	backup := act.Command("backup", "Creates a backup of all  JetStream Streams over the STHG-MS network").Alias("snapshot").Action(c.backupAction)
 	backup.Arg("target", "Directory to create the backup in").Required().StringVar(&c.backupDirectory)
-	backup.Flag("check", "Checks the Stream for health prior to backup").Default("false").BoolVar(&c.healthCheck)
-	backup.Flag("consumers", "Enable or disable consumer backups").Default("true").BoolVar(&c.snapShotConsumers)
-	backup.Flag("force", "Perform backup without prompting").Short('f').BoolVar(&c.force)
+	backup.Flag("check", "Checks the Stream for health prior to backup").UnNegatableBoolVar(&c.healthCheck)
+	backup.Flag("consumers", "Enable or disable consumer backups").Default("true").UnNegatableBoolVar(&c.snapShotConsumers)
+	backup.Flag("force", "Perform backup without prompting").Short('f').UnNegatableBoolVar(&c.force)
+	backup.Flag("critical-warnings", "Treat warnings as failures").Short('w').UnNegatableBoolVar(&c.failOnWarn)
 
 	restore := act.Command("restore", "Restore an account backup over the STHG-MS network").Action(c.restoreAction)
 	restore.Arg("directory", "The directory holding the account backup to restore").Required().ExistingDirVar(&c.backupDirectory)
 	restore.Flag("cluster", "Place the stream in a specific cluster").StringVar(&c.placementCluster)
 	restore.Flag("tag", "Place the stream on servers that has specific tags (pass multiple times)").StringsVar(&c.placementTags)
-
-	cheats["account"] = `# To view account information and connection
-ms-client account info
-
-# To report connections for your command
-ms-client account report connections
-
-# To backup all JetStream streams
-ms-client account backup /path/to/backup --check
-`
 }
 
 func init() {
 	registerCommand("account", 0, configureActCommand)
 }
 
-func (c *actCmd) backupAction(_ *kingpin.ParseContext) error {
+func (c *actCmd) backupAction(_ *fisk.ParseContext) error {
 	var err error
 
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
-	streams, err := mgr.Streams()
+	streams, err := mgr.Streams(nil)
 	if err != nil {
 		return err
 	}
@@ -123,30 +125,47 @@ func (c *actCmd) backupAction(_ *kingpin.ParseContext) error {
 		return err
 	}
 
-	var errors []error
+	var errs []error
+	var warns []error
+
 	for _, s := range streams {
 		err = backupStream(s, false, c.snapShotConsumers, c.healthCheck, filepath.Join(c.backupDirectory, s.Name()))
-		if err != nil {
+		if errors.Is(err, jsm.ErrMemoryStreamNotSupported) {
+			fmt.Printf("Backup of %s failed: %v\n", s.Name(), err)
+			warns = append(warns, fmt.Errorf("%s: %w", s.Name(), err))
+		} else if err != nil {
 			fmt.Printf("Backup of %s failed: %s\n", s.Name(), err)
-			errors = append(errors, fmt.Errorf("%s: %s", s.Name(), err))
+			errs = append(errs, fmt.Errorf("%s: %s", s.Name(), err))
 		}
 		fmt.Println()
 	}
 
-	if len(errors) > 0 {
-		fmt.Printf("Backup failures: \n")
-		for _, err := range errors {
-			fmt.Printf("  %s", err)
+	if len(warns) > 0 {
+		fmt.Printf("Backup Warnings: \n")
+		for _, err := range warns {
+			fmt.Printf("  %s\n", err)
 		}
+		fmt.Println()
+	}
+
+	if len(errs) > 0 {
+		fmt.Printf("Backup failures: \n")
+		for _, err := range errs {
+			fmt.Printf("  %s\n", err)
+		}
+		fmt.Println()
+	}
+
+	if len(errs) > 0 || len(warns) > 0 && c.failOnWarn {
 		return fmt.Errorf("backup failed")
 	}
 
 	return nil
 }
 
-func (c *actCmd) restoreAction(kp *kingpin.ParseContext) error {
+func (c *actCmd) restoreAction(kp *fisk.ParseContext) error {
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 	streams, err := mgr.StreamNames(nil)
 	if err != nil {
 		return err
@@ -156,28 +175,28 @@ func (c *actCmd) restoreAction(kp *kingpin.ParseContext) error {
 		existingStreams[n] = struct{}{}
 	}
 	de, err := os.ReadDir(c.backupDirectory)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 	for _, d := range de {
 		if !d.IsDir() {
-			kingpin.FatalIfError(err, "expected a directory")
+			fisk.FatalIfError(err, "expected a directory")
 		}
 		if _, ok := existingStreams[d.Name()]; ok {
-			kingpin.Fatalf("stream %q exists already", d.Name())
+			fisk.Fatalf("stream %q exists already", d.Name())
 		}
 		_, err := os.Stat(filepath.Join(c.backupDirectory, d.Name(), "backup.json"))
-		kingpin.FatalIfError(err, "expected backup.json")
+		fisk.FatalIfError(err, "expected backup.json")
 	}
 	fmt.Printf("Restoring backup of all %d streams in directory %q\n\n", len(de), c.backupDirectory)
 	s := &streamCmd{msgID: -1, showProgress: false, placementCluster: c.placementCluster, placementTags: c.placementTags}
 	for _, d := range de {
 		s.backupDirectory = filepath.Join(c.backupDirectory, d.Name())
 		err := s.restoreAction(kp)
-		kingpin.FatalIfError(err, "restore for %s failed", d.Name())
+		fisk.FatalIfError(err, "restore for %s failed", d.Name())
 	}
 	return nil
 }
 
-func (c *actCmd) reportConnectionsAction(pc *kingpin.ParseContext) error {
+func (c *actCmd) reportConnectionsAction(pc *fisk.ParseContext) error {
 	cmd := SrvReportCmd{
 		topk:    c.topk,
 		sort:    c.sort,
@@ -187,7 +206,122 @@ func (c *actCmd) reportConnectionsAction(pc *kingpin.ParseContext) error {
 	return cmd.reportConnections(pc)
 }
 
-func (c *actCmd) renderTier(name string, tier *api.JetStreamTier) {
+func (c *actCmd) reportServerStats(_ *fisk.ParseContext) error {
+	nc, _, err := prepareHelper("", natsOpts()...)
+	if err != nil {
+		return err
+	}
+
+	res, err := doReq(nil, "$SYS.REQ.ACCOUNT.PING.STATZ", 0, nc)
+	if err != nil {
+		return err
+	}
+
+	if len(res) == 0 {
+		return fmt.Errorf("did not get results from any servers")
+	}
+
+	table := newTableWriter("Server Statistics")
+	table.AddHeaders("Server", "Cluster", "Version", "Tags", "Connections", "Leafnodes", "Sent Bytes", "Sent Messages", "Received Bytes", "Received Messages", "Slow Consumers")
+
+	var (
+		conn, ln           int
+		sb, sm, rb, rm, sc int64
+	)
+	for _, r := range res {
+		sz, err := c.parseAccountStatResp(r)
+		if err != nil {
+			return err
+		}
+
+		if len(sz.Stats.Accounts) == 0 {
+			continue
+		}
+
+		stats := sz.Stats.Accounts[0]
+
+		conn += stats.Conns
+		ln += stats.LeafNodes
+		sb += stats.Sent.Bytes
+		sm += stats.Sent.Msgs
+		rb += stats.Received.Bytes
+		rm += stats.Received.Msgs
+		sc += stats.SlowConsumers
+
+		table.AddRow(
+			sz.ServerInfo.Host,
+			sz.ServerInfo.Cluster,
+			sz.ServerInfo.Version,
+			strings.Join(sz.ServerInfo.Tags, ", "),
+			humanize.Comma(int64(stats.Conns)),
+			humanize.Comma(int64(stats.LeafNodes)),
+			humanize.IBytes(uint64(stats.Sent.Bytes)),
+			humanize.Comma(stats.Sent.Msgs),
+			humanize.IBytes(uint64(stats.Received.Bytes)),
+			humanize.Comma(stats.Received.Msgs),
+			humanize.Comma(stats.SlowConsumers),
+		)
+	}
+	table.AddSeparator()
+	table.AddRow(len(res), "", "", "", humanize.Comma(int64(conn)), humanize.Comma(int64(ln)), humanize.IBytes(uint64(sb)), humanize.Comma(sm), humanize.IBytes(uint64(rb)), humanize.Comma(rm), humanize.Comma(sc))
+	fmt.Print(table.Render())
+	fmt.Println()
+
+	return nil
+}
+
+func (c *actCmd) parseAccountStatResp(resp []byte) (*accountStats, error) {
+	reqresp := map[string]json.RawMessage{}
+	err := json.Unmarshal(resp, &reqresp)
+	if err != nil {
+		return nil, err
+	}
+
+	errresp, ok := reqresp["error"]
+	if ok {
+		res := map[string]any{}
+		err := json.Unmarshal(errresp, &res)
+		if err != nil {
+			return nil, fmt.Errorf("invalid response received: %q", errresp)
+		}
+
+		msg, ok := res["description"]
+		if !ok {
+			return nil, fmt.Errorf("invalid response received: %q", errresp)
+		}
+
+		return nil, fmt.Errorf("invalid response received: %v", msg)
+	}
+
+	data, ok := reqresp["data"]
+	if !ok {
+		return nil, fmt.Errorf("no data received in response: %#v", reqresp)
+	}
+
+	sz := &accountStats{Stats: &server.AccountStatz{}, ServerInfo: &server.ServerInfo{}}
+	s, ok := reqresp["server"]
+	if !ok {
+		return nil, fmt.Errorf("no server data received in response: %#v", reqresp)
+	}
+	err = json.Unmarshal(s, sz.ServerInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	err = json.Unmarshal(data, sz.Stats)
+	if err != nil {
+		return nil, err
+	}
+
+	return sz, nil
+}
+
+type accountStats struct {
+	Stats      *server.AccountStatz
+	ServerInfo *server.ServerInfo
+}
+
+func (c *actCmd) renderTier(name string, tier api.JetStreamTier) {
 	fmt.Printf("   Tier: %s\n\n", name)
 
 	fmt.Printf("      Configuration Requirements:\n\n")
@@ -240,13 +374,14 @@ func (c *actCmd) renderTier(name string, tier *api.JetStreamTier) {
 	fmt.Println()
 }
 
-func (c *actCmd) infoAction(_ *kingpin.ParseContext) error {
+func (c *actCmd) infoAction(_ *fisk.ParseContext) error {
 	nc, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	id, _ := nc.GetClientID()
 	ip, _ := nc.GetClientIP()
 	rtt, _ := nc.RTT()
+	tlsc, _ := nc.TLSConnectionState()
 
 	fmt.Println("Connection Information:")
 	fmt.Println()
@@ -264,7 +399,31 @@ func (c *actCmd) infoAction(_ *kingpin.ParseContext) error {
 	if nc.ConnectedServerId() != nc.ConnectedServerName() {
 		fmt.Printf("   Connected Server Name: %v\n", nc.ConnectedServerName())
 	}
+	if tlsc.HandshakeComplete {
+		version := ""
+		switch tlsc.Version {
+		case tls.VersionTLS10:
+			version = "1.0"
+		case tls.VersionTLS11:
+			version = "1.1"
+		case tls.VersionTLS12:
+			version = "1.2"
+		case tls.VersionTLS13:
+			version = "1.3"
+		default:
+			version = fmt.Sprintf("unknown (%x)", tlsc.Version)
+		}
 
+		fmt.Printf("             TLS Version: %s using %s\n", version, tls.CipherSuiteName(tlsc.CipherSuite))
+		fmt.Printf("              TLS Server: %v\n", tlsc.ServerName)
+		if len(tlsc.VerifiedChains) > 0 {
+			fmt.Printf("            TLS Verified: issuer %s\n", tlsc.PeerCertificates[0].Issuer.String())
+		} else {
+			fmt.Printf("            TLS Verified: no\n")
+		}
+	} else {
+		fmt.Printf("          TLS Connection: no\n")
+	}
 	fmt.Println()
 
 	info, err := mgr.JetStreamAccountInfo()
@@ -287,11 +446,17 @@ func (c *actCmd) infoAction(_ *kingpin.ParseContext) error {
 		fmt.Printf("   Max Message Payload: %s \n\n", humanize.IBytes(uint64(nc.MaxPayload())))
 
 		if tiered {
-			for n, t := range info.Tiers {
-				c.renderTier(n, &t)
+			var tiers []string
+			for n := range info.Tiers {
+				tiers = append(tiers, n)
+			}
+			sort.Strings(tiers)
+
+			for _, n := range tiers {
+				c.renderTier(n, info.Tiers[n])
 			}
 		} else {
-			c.renderTier("Default", &info.JetStreamTier)
+			c.renderTier("Default", info.JetStreamTier)
 		}
 
 	case context.DeadlineExceeded:

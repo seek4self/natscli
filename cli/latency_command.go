@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/nats.go"
 	histwriter "github.com/tylertreat/hdrhistogram-writer"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type latencyCmd struct {
@@ -45,22 +45,19 @@ func configureLatencyCommand(app commandHost) {
 	c := &latencyCmd{}
 
 	latency := app.Command("latency", "Perform latency tests between two NATS servers").Alias("lat").Action(c.latencyAction)
+	addCheat("latency", latency)
 	latency.Flag("server-b", "The second server to to subscribe on").Required().StringVar(&c.serverB)
 	latency.Flag("size", "Message size").Default("8").IntVar(&c.msgSize)
 	latency.Flag("rate", "Rate of messages per second").Default("1000").IntVar(&c.targetPubRate)
 	latency.Flag("duration", "Test duration").Default("5s").DurationVar(&c.testDuration)
 	latency.Flag("histogram", "Output file to store the histogram in").StringVar(&c.histFile)
-
-	cheats["latency"] = `# To test latency between 2 servers
-nats latency --server srv1.example.net:4222 --server-b srv2.example.net:4222 --duration 10s
-`
 }
 
 func init() {
 	registerCommand("latency", 11, configureLatencyCommand)
 }
 
-func (c *latencyCmd) latencyAction(_ *kingpin.ParseContext) error {
+func (c *latencyCmd) latencyAction(_ *fisk.ParseContext) error {
 	start := time.Now()
 	c.numPubs = int(c.testDuration/time.Second) * c.targetPubRate
 

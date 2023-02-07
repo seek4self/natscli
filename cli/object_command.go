@@ -24,12 +24,12 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/gosuri/uiprogress"
 	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type objCommand struct {
@@ -38,7 +38,7 @@ type objCommand struct {
 	overrideName        string
 	hdrs                []string
 	force               bool
-	noProgress          bool
+	progress            bool
 	storage             string
 	listNames           bool
 	placementCluster    string
@@ -63,6 +63,7 @@ NOTE: This is an experimental feature.
 `
 
 	obj := app.Command("object", help).Alias("obj")
+	addCheat("obj", obj)
 
 	add := obj.Command("add", "Adds a new Object Store Bucket").Action(c.addAction)
 	add.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
@@ -81,20 +82,20 @@ NOTE: This is an experimental feature.
 	put.Flag("name", "Override the name supplied to the object store").StringVar(&c.overrideName)
 	put.Flag("description", "Sets an optional description for the object").StringVar(&c.description)
 	put.Flag("header", "Adds headers to the object").Short('H').StringsVar(&c.hdrs)
-	put.Flag("no-progress", "Disables progress bars").Default("false").BoolVar(&c.noProgress)
-	put.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
+	put.Flag("progress", "Disable progress bars").Default("true").BoolVar(&c.progress)
+	put.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
 	del := obj.Command("del", "Deletes a file or bucket from the store").Action(c.delAction).Alias("rm")
 	del.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	del.Arg("file", "The file to retrieve").StringVar(&c.file)
-	del.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
+	del.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
 	get := obj.Command("get", "Retrieves a file from the store").Action(c.getAction)
 	get.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
 	get.Arg("file", "The file to retrieve").Required().StringVar(&c.file)
 	get.Flag("output", "Override the output file name").Short('O').StringVar(&c.overrideName)
-	get.Flag("no-progress", "Disables progress bars").Default("false").BoolVar(&c.noProgress)
-	get.Flag("force", "Act without confirmation").Short('f').BoolVar(&c.force)
+	get.Flag("progress", "Disable progress bars").Default("true").BoolVar(&c.progress)
+	get.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
 	info := obj.Command("info", "Get information about a bucket or object").Alias("show").Alias("i").Action(c.infoAction)
 	info.Arg("bucket", "The bucket to act on").StringVar(&c.bucket)
@@ -102,62 +103,21 @@ NOTE: This is an experimental feature.
 
 	ls := obj.Command("ls", "List buckets or contents of a specific bucket").Action(c.lsAction)
 	ls.Arg("bucket", "The bucket to act on").StringVar(&c.bucket)
-	ls.Flag("names", "When listing buckets, show just the bucket names").Short('n').BoolVar(&c.listNames)
+	ls.Flag("names", "When listing buckets, show just the bucket names").Short('n').UnNegatableBoolVar(&c.listNames)
 
 	seal := obj.Command("seal", "Seals a bucket preventing further updates").Action(c.sealAction)
 	seal.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
-	seal.Flag("force", "Force sealing without prompting").Short('f').BoolVar(&c.force)
+	seal.Flag("force", "Force sealing without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
 	watch := obj.Command("watch", "Watch a bucket for changes").Action(c.watchAction)
 	watch.Arg("bucket", "The bucket to act on").Required().StringVar(&c.bucket)
-
-	cheats["obj"] = `# to create a replicated bucket
-nats obj add FILES --replicas 3
-
-# store a file in the bucket
-nats obj put FILES image.jpg
-
-# store contents of STDIN in the bucket
-cat x.jpg|nats obj put FILES --name image.jpg
-
-# retrieve a file from a bucket
-nats obj get FILES image.jpg -O out.jpg
-
-# delete a file
-nats obj del FILES image.jpg
-
-# delete a bucket
-nats obj del FILES
-
-# view bucket info
-nats obj info FILES
-
-# view file info
-nats obj info FILES image.jpg
-
-# list known buckets
-nats obj ls
-
-# view all files in a bucket
-nats obj ls FILES
-
-# prevent further modifications to the bucket
-nats obj seal FILES
-
-# create a bucket backup for FILES into backups/FILES
-nats obj status FILES
-nats stream backup <stream name> backups/FILES
-
-# restore a bucket from a backup
-nats stream restore <stream name> backups/FILES
-`
 }
 
 func init() {
 	registerCommand("object", 10, configureObjectCommand)
 }
 
-func (c *objCommand) parseLimitStrings(_ *kingpin.ParseContext) (err error) {
+func (c *objCommand) parseLimitStrings(_ *fisk.ParseContext) (err error) {
 	if c.maxBucketSizeString != "" {
 		c.maxBucketSize, err = parseStringAsBytes(c.maxBucketSizeString)
 		if err != nil {
@@ -168,7 +128,7 @@ func (c *objCommand) parseLimitStrings(_ *kingpin.ParseContext) (err error) {
 	return nil
 }
 
-func (c *objCommand) watchAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) watchAction(_ *fisk.ParseContext) error {
 	_, _, obj, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -195,10 +155,10 @@ func (c *objCommand) watchAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *objCommand) sealAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) sealAction(_ *fisk.ParseContext) error {
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really seal Bucket %s, sealed buckets can not be unsealed or modified", c.bucket), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -220,7 +180,7 @@ func (c *objCommand) sealAction(_ *kingpin.ParseContext) error {
 	return c.showBucketInfo(obj)
 }
 
-func (c *objCommand) delAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) delAction(_ *fisk.ParseContext) error {
 	_, _, obj, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -274,7 +234,7 @@ func (c *objCommand) delAction(_ *kingpin.ParseContext) error {
 	}
 }
 
-func (c *objCommand) infoAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) infoAction(_ *fisk.ParseContext) error {
 	_, _, obj, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -387,7 +347,7 @@ func (c *objCommand) listBuckets() error {
 	}
 
 	var found []*jsm.Stream
-	err = mgr.EachStream(func(s *jsm.Stream) {
+	err = mgr.EachStream(nil, func(s *jsm.Stream) {
 		if s.IsObjectBucket() {
 			found = append(found, s)
 		}
@@ -428,7 +388,7 @@ func (c *objCommand) listBuckets() error {
 	return nil
 }
 
-func (c *objCommand) lsAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) lsAction(_ *fisk.ParseContext) error {
 	if c.bucket == "" {
 		return c.listBuckets()
 	}
@@ -460,7 +420,7 @@ func (c *objCommand) lsAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *objCommand) putAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) putAction(_ *fisk.ParseContext) error {
 	_, _, obj, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -480,7 +440,7 @@ func (c *objCommand) putAction(_ *kingpin.ParseContext) error {
 		c.showObjectInfo(nfo)
 		fmt.Println()
 		ok, err := askConfirmation(fmt.Sprintf("Replace existing file %s > %s", c.bucket, name), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -523,7 +483,7 @@ func (c *objCommand) putAction(_ *kingpin.ParseContext) error {
 	var progress *uiprogress.Bar
 	stop := func() {}
 
-	if !opts.Trace && !c.noProgress && stat != nil && stat.Size() > 20480 {
+	if !opts.Trace && c.progress && stat != nil && stat.Size() > 20480 {
 		hs := humanize.IBytes(uint64(stat.Size()))
 		progress = uiprogress.AddBar(int(stat.Size())).PrependFunc(func(b *uiprogress.Bar) string {
 			return fmt.Sprintf("%s / %s", humanize.IBytes(uint64(b.Current())), hs)
@@ -547,7 +507,7 @@ func (c *objCommand) putAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *objCommand) getAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) getAction(_ *fisk.ParseContext) error {
 	_, _, obj, err := c.loadBucket()
 	if err != nil {
 		return err
@@ -581,7 +541,7 @@ func (c *objCommand) getAction(_ *kingpin.ParseContext) error {
 		_, err = os.Stat(out)
 		if !os.IsNotExist(err) {
 			ok, err := askConfirmation(fmt.Sprintf("Replace existing target file %s", out), false)
-			kingpin.FatalIfError(err, "could not obtain confirmation")
+			fisk.FatalIfError(err, "could not obtain confirmation")
 
 			if !ok {
 				return nil
@@ -599,7 +559,7 @@ func (c *objCommand) getAction(_ *kingpin.ParseContext) error {
 	pw := io.Writer(of)
 	stop := func() {}
 
-	if !opts.Trace && !c.noProgress && nfo.Size > 20480 {
+	if !opts.Trace && c.progress && nfo.Size > 20480 {
 		hs := humanize.IBytes(nfo.Size)
 		progress = uiprogress.AddBar(int(nfo.Size)).PrependFunc(func(b *uiprogress.Bar) string {
 			return fmt.Sprintf("%s / %s", humanize.IBytes(uint64(b.Current())), hs)
@@ -638,7 +598,7 @@ func (c *objCommand) getAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *objCommand) addAction(_ *kingpin.ParseContext) error {
+func (c *objCommand) addAction(_ *fisk.ParseContext) error {
 	_, js, err := prepareJSHelper()
 	if err != nil {
 		return err

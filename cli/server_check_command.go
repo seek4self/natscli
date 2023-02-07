@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type SrvCheckCmd struct {
@@ -82,17 +82,18 @@ type SrvCheckCmd struct {
 	kvKey        string
 }
 
-func configureServerCheckCommand(srv *kingpin.CmdClause) {
+func configureServerCheckCommand(srv *fisk.CmdClause) {
 	c := &SrvCheckCmd{}
 
-	help := `Nagios protocol health check for NATS servers
+	help := `Health check for NATS servers
 
    connection  - connects and does a request-reply check
    stream      - checks JetStream streams for source, mirror and cluster health
    meta        - JetStream Meta Cluster health
 `
 	check := srv.Command("check", help)
-	check.Flag("format", "Render the check in a specific format").Default("nagios").EnumVar(&checkRenderFormat, "nagios", "json", "prometheus", "text")
+	check.Flag("format", "Render the check in a specific format (nagios, json, prometheus, text)").Default("nagios").EnumVar(&checkRenderFormat, "nagios", "json", "prometheus", "text")
+	check.Flag("namespace", "The prometheus namespace to use in output").Default(opts.PrometheusNamespace).StringVar(&opts.PrometheusNamespace)
 	check.Flag("outfile", "Save output to a file rather than STDOUT").StringVar(&checkRenderOutFile)
 
 	conn := check.Command("connection", "Checks basic server connection").Alias("conn").Default().Action(c.checkConnection)
@@ -142,9 +143,9 @@ func configureServerCheckCommand(srv *kingpin.CmdClause) {
 	serv.Flag("subs-critical", "Critical threshold for number of active subscriptions, supports inversion").IntVar(&c.srvSubCrit)
 	serv.Flag("uptime-warn", "Warning threshold for server uptime as duration").DurationVar(&c.srvUptimeWarn)
 	serv.Flag("uptime-critical", "Critical threshold for server uptime as duration").DurationVar(&c.srvUptimeCrit)
-	serv.Flag("auth-required", "Checks that authentication is enabled").Default("false").BoolVar(&c.srvAuthRequire)
-	serv.Flag("tls-required", "Checks that TLS is required").Default("false").BoolVar(&c.srvTLSRequired)
-	serv.Flag("js-required", "Checks that JetStream is enabled").Default("false").BoolVar(&c.srvJSRequired)
+	serv.Flag("auth-required", "Checks that authentication is enabled").UnNegatableBoolVar(&c.srvAuthRequire)
+	serv.Flag("tls-required", "Checks that TLS is required").UnNegatableBoolVar(&c.srvTLSRequired)
+	serv.Flag("js-required", "Checks that JetStream is enabled").UnNegatableBoolVar(&c.srvJSRequired)
 
 	kv := check.Command("kv", "Checks a NATS KV Bucket").Action(c.checkKV)
 	kv.Flag("bucket", "Checks a specific bucket").Required().StringVar(&c.kvBucket)
@@ -179,24 +180,24 @@ func (r *result) pd(pd ...*perfDataItem) {
 	r.PerfData = append(r.PerfData, pd...)
 }
 
-func (r *result) criticalExit(format string, a ...interface{}) {
+func (r *result) criticalExit(format string, a ...any) {
 	r.critical(format, a...)
 	r.GenericExit()
 }
 
-func (r *result) critical(format string, a ...interface{}) {
+func (r *result) critical(format string, a ...any) {
 	r.Criticals = append(r.Criticals, fmt.Sprintf(format, a...))
 }
 
-func (r *result) warn(format string, a ...interface{}) {
+func (r *result) warn(format string, a ...any) {
 	r.Warnings = append(r.Warnings, fmt.Sprintf(format, a...))
 }
 
-func (r *result) ok(format string, a ...interface{}) {
+func (r *result) ok(format string, a ...any) {
 	r.OKs = append(r.OKs, fmt.Sprintf(format, a...))
 }
 
-func (r *result) criticalIfErr(err error, format string, a ...interface{}) bool {
+func (r *result) criticalIfErr(err error, format string, a ...any) bool {
 	if err == nil {
 		return false
 	}
@@ -277,6 +278,10 @@ func (r *result) renderPrometheus() string {
 		r.Check = r.Name
 	}
 
+	if opts.PrometheusNamespace == "" {
+		opts.PrometheusNamespace = "nats_server_check"
+	}
+
 	registry := prometheus.NewRegistry()
 	prometheus.DefaultRegisterer = registry
 	prometheus.DefaultGatherer = registry
@@ -289,7 +294,7 @@ func (r *result) renderPrometheus() string {
 		}
 
 		gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: fmt.Sprintf("nats_server_check_%s_%s", r.Check, pd.Name),
+			Name: prometheus.BuildFQName(opts.PrometheusNamespace, r.Check, pd.Name),
 			Help: help,
 		}, []string{"item"})
 		prometheus.MustRegister(gauge)
@@ -535,7 +540,7 @@ func (c *SrvCheckCmd) checkKVStatusAndBucket(check *result, nc *nats.Conn) {
 	}
 }
 
-func (c *SrvCheckCmd) checkKV(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkKV(_ *fisk.ParseContext) error {
 	check := &result{Name: c.kvBucket, Check: "kv"}
 	defer check.GenericExit()
 
@@ -547,7 +552,7 @@ func (c *SrvCheckCmd) checkKV(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvCheckCmd) checkSrv(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkSrv(_ *fisk.ParseContext) error {
 	check := &result{Name: c.srvName, Check: "server"}
 	defer check.GenericExit()
 
@@ -705,7 +710,7 @@ func (c *SrvCheckCmd) fetchVarz() (*server.Varz, error) {
 	return varz, nil
 }
 
-func (c *SrvCheckCmd) checkJS(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkJS(_ *fisk.ParseContext) error {
 	check := &result{Name: "JetStream", Check: "jetstream"}
 	defer check.GenericExit()
 
@@ -770,7 +775,7 @@ func (c *SrvCheckCmd) checkAccountInfo(check *result, info *api.JetStreamAccount
 	return nil
 }
 
-func (c *SrvCheckCmd) checkRaft(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkRaft(_ *fisk.ParseContext) error {
 	check := &result{Name: "JetStream Meta Cluster", Check: "meta"}
 	defer check.GenericExit()
 
@@ -900,7 +905,7 @@ func (c *SrvCheckCmd) checkClusterInfo(check *result, ci *server.ClusterInfo) er
 	return nil
 }
 
-func (c *SrvCheckCmd) checkStream(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkStream(_ *fisk.ParseContext) error {
 	check := &result{Name: c.sourcesStream, Check: "stream"}
 	defer check.GenericExit()
 
@@ -1019,7 +1024,7 @@ func (c *SrvCheckCmd) checkSources(check *result, info *api.StreamInfo) error {
 	return nil
 }
 
-func (c *SrvCheckCmd) checkConnection(_ *kingpin.ParseContext) error {
+func (c *SrvCheckCmd) checkConnection(_ *fisk.ParseContext) error {
 	check := &result{Name: "Connection", Check: "connections"}
 	defer check.GenericExit()
 

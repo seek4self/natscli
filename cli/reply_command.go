@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/kballard/go-shellquote"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type replyCmd struct {
@@ -41,9 +41,7 @@ type replyCmd struct {
 
 func configureReplyCommand(app commandHost) {
 	c := &replyCmd{}
-	help := `Generic service reply utility
-
-The "command" supports extracting some information from the subject the request came in on.
+	help := `The "command" supports extracting some information from the subject the request came in on.
 
 When the subject being listened on is "weather.>" a request on "weather.london" can extract
 the "london" part and use it in the command string:
@@ -54,13 +52,17 @@ This will request the weather for london when invoked as:
 
   ms-client request weather.london ''
 
+Use {{.Request}} to access the request body within the --command
+  
+The command gets also spawned with two ENVs:
+  NATS_REQUEST_SUBJECT
+  NATS_REQUEST_BODY
+
+  nats reply 'echo' --command="printenv NATS_REQUEST_BODY" 
+  
 The body and Header values of the messages may use Go templates to create unique messages.
 
    ms-client reply test "Message {{Count}} @ {{Time}}"
-
-Multiple messages with random strings between 10 and 100 long:
-
-   ms-client pub test --count 10 "Message {{Count}}: {{ Random 10 100 }}"
 
 Available template functions are:
 
@@ -70,34 +72,28 @@ Available template functions are:
    UnixNano         nano seconds since 1970 in UTC
    Time             the current time
    ID               an unique ID
-   Random(min, max) random string at least min long, at most max 
-
+   Request          the request payload
+   Random(min, max) random string at least min long, at most max
 `
 
-	act := app.Command("reply", help).Action(c.reply)
+	act := app.Command("reply", "Generic service reply utility").Action(c.reply)
+	act.HelpLong(help)
+	addCheat("reply", act)
 	act.Arg("subject", "Subject to subscribe to").Required().StringVar(&c.subject)
 	act.Arg("body", "Reply body").StringVar(&c.body)
-	act.Flag("echo", "Echo back what is received").BoolVar(&c.echo)
+	act.Flag("echo", "Echo back what is received").UnNegatableBoolVar(&c.echo)
 	act.Flag("command", "Runs a command and responds with the output if exit code was 0").StringVar(&c.command)
 	act.Flag("queue", "Queue group name").Default("NATS-RPLY-22").Short('q').StringVar(&c.queue)
 	act.Flag("sleep", "Inject a random sleep delay between replies up to this duration max").PlaceHolder("MAX").DurationVar(&c.sleep)
 	act.Flag("header", "Adds headers to the message").Short('H').StringsVar(&c.hdrs)
 	act.Flag("count", "Quit after receiving this many messages").UintVar(&c.limit)
-
-	cheats["reply"] = `# To set up a responder that runs an external command with the 3rd subject token as argument
-ms-client reply "service.requests.>" --command "service.sh {{2}}"
-
-# To set up basic responder
-ms-client reply service.requests "Message {{Count}} @ {{Time}}"
-ms-client reply service.requests --echo --sleep 10
-`
 }
 
 func init() {
 	registerCommand("reply", 12, configureReplyCommand)
 }
 
-func (c *replyCmd) reply(_ *kingpin.ParseContext) error {
+func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 	nc, err := newNatsConn("", natsOpts()...)
 	if err != nil {
 		return err
@@ -153,6 +149,12 @@ func (c *replyCmd) reply(_ *kingpin.ParseContext) error {
 				rawCmd = strings.Replace(rawCmd, fmt.Sprintf("{{%d}}", i), t, -1)
 			}
 
+			parsedCmd, err := pubReplyBodyTemplate(rawCmd, string(m.Data), i)
+			if err != nil {
+				log.Printf("Could not parse command template: %s", err)
+			}
+			rawCmd = string(parsedCmd)
+
 			cmdParts, err := shellquote.Split(rawCmd)
 			if err != nil {
 				log.Printf("Could not parse command: %s", err)
@@ -178,7 +180,7 @@ func (c *replyCmd) reply(_ *kingpin.ParseContext) error {
 			}
 
 		default:
-			body, err := pubReplyBodyTemplate(c.body, i)
+			body, err := pubReplyBodyTemplate(c.body, string(m.Data), i)
 			if err != nil {
 				log.Printf("Could not parse body template: %s", err)
 			}

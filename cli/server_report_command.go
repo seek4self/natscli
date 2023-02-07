@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,12 +18,12 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/xlab/tablewriter"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type SrvReportCmd struct {
@@ -50,11 +50,11 @@ type srvReportAccountInfo struct {
 	Server      []*server.ServerInfo `json:"server"`
 }
 
-func configureServerReportCommand(srv *kingpin.CmdClause) {
+func configureServerReportCommand(srv *fisk.CmdClause) {
 	c := &SrvReportCmd{}
 
 	report := srv.Command("report", "Report on various server metrics").Alias("rep")
-	report.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+	report.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 	report.Flag("reverse", "Reverse sort connections").Short('R').Default("true").BoolVar(&c.reverse)
 
 	conns := report.Command("connections", "Report on connections").Alias("conn").Alias("connz").Alias("conns").Action(c.reportConnections)
@@ -77,7 +77,7 @@ func configureServerReportCommand(srv *kingpin.CmdClause) {
 	jsz.Flag("compact", "Compact server names").Default("true").BoolVar(&c.compact)
 }
 
-func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
+func (c *SrvReportCmd) reportJetStream(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -216,7 +216,7 @@ func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
 			cluster = js.Data.Meta
 		}
 
-		row := []interface{}{cNames[i] + leader, js.Server.Cluster}
+		row := []any{cNames[i] + leader, js.Server.Cluster}
 		if renderDomain {
 			row = append(row, js.Data.Config.Domain)
 		}
@@ -234,7 +234,7 @@ func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
 	}
 
 	table.AddSeparator()
-	row := []interface{}{"", ""}
+	row := []any{"", ""}
 	if renderDomain {
 		row = append(row, "")
 	}
@@ -268,11 +268,13 @@ func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
 		}
 
 		table := newTableWriter("RAFT Meta Group Information")
-		table.AddHeaders("Name", "Leader", "Current", "Online", "Active", "Lag")
+		table.AddHeaders("Name", "ID", "Leader", "Current", "Online", "Active", "Lag")
 		for i, replica := range cluster.Replicas {
 			leader := ""
+			peer := replica.Peer
 			if replica.Name == cluster.Leader {
 				leader = "yes"
+				peer = cluster.Peer
 			}
 
 			online := "true"
@@ -280,7 +282,7 @@ func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
 				online = color.New(color.Bold).Sprint("false")
 			}
 
-			table.AddRow(cNames[i], leader, replica.Current, online, humanizeDuration(replica.Active), humanize.Comma(int64(replica.Lag)))
+			table.AddRow(cNames[i], peer, leader, replica.Current, online, humanizeDuration(replica.Active), humanize.Comma(int64(replica.Lag)))
 		}
 		fmt.Print(table.Render())
 	}
@@ -288,7 +290,7 @@ func (c *SrvReportCmd) reportJetStream(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *SrvReportCmd) reportAccount(_ *kingpin.ParseContext) error {
+func (c *SrvReportCmd) reportAccount(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -407,7 +409,7 @@ type connInfo struct {
 	Info *server.ServerInfo `json:"server"`
 }
 
-func (c *SrvReportCmd) reportConnections(_ *kingpin.ParseContext) error {
+func (c *SrvReportCmd) reportConnections(_ *fisk.ParseContext) error {
 	nc, _, err := prepareHelper("", natsOpts()...)
 	if err != nil {
 		return err
@@ -576,7 +578,18 @@ func parseConnzResp(resp []byte) (connz, error) {
 
 	errresp, ok := reqresp["error"]
 	if ok {
-		return connz{}, fmt.Errorf("invalid response received: %#v", errresp)
+		res := map[string]any{}
+		err := json.Unmarshal(errresp, &res)
+		if err != nil {
+			return connz{}, fmt.Errorf("invalid response received: %q", errresp)
+		}
+
+		msg, ok := res["description"]
+		if !ok {
+			return connz{}, fmt.Errorf("invalid response received: %q", errresp)
+		}
+
+		return connz{}, fmt.Errorf("invalid response received: %v", msg)
 	}
 
 	data, ok := reqresp["data"]
@@ -637,19 +650,21 @@ func (c *SrvReportCmd) getConnz(limit int, nc *nats.Conn) (connzList, error) {
 		return result[:limit], nil
 	}
 
-	incomplete := []connz{}
-	for _, con := range result {
-		if con.Connz.Offset+con.Connz.Limit < con.Connz.Total {
-			incomplete = append(incomplete, con)
+	offset := 0
+	for _, conn := range result {
+		if conn.Connz.Offset+conn.Connz.Limit < conn.Connz.Total {
+
+			offset = conn.Connz.Offset + conn.Connz.Limit + 1
+			break
 		}
 	}
 
-	if len(incomplete) > 0 && !c.json {
+	if offset > 0 && !c.json {
 		fmt.Print("Gathering paged connection information")
 	}
 
 	for {
-		if len(incomplete) == 0 {
+		if offset <= 0 {
 			break
 		}
 
@@ -659,43 +674,45 @@ func (c *SrvReportCmd) getConnz(limit int, nc *nats.Conn) (connzList, error) {
 
 		fmt.Print(".")
 
-		getList := incomplete[0:]
-		incomplete = []connz{}
+		// get on offset
+		// iterate and add to results
 
-		for _, conn := range getList {
-			req := &server.ConnzEventOptions{
-				ConnzOptions: server.ConnzOptions{
-					Subscriptions:       true,
-					SubscriptionsDetail: false,
-					Account:             c.account,
-					Username:            true,
-					Offset:              conn.Connz.Offset + conn.Connz.Limit + 1,
-				},
-				EventFilterOptions: c.reqFilter(),
-			}
+		req := &server.ConnzEventOptions{
+			ConnzOptions: server.ConnzOptions{
+				Subscriptions:       true,
+				SubscriptionsDetail: false,
+				Account:             c.account,
+				Username:            true,
+				Offset:              offset,
+			},
+			EventFilterOptions: c.reqFilter(),
+		}
 
-			res, err := doReq(req, fmt.Sprintf("$SYS.REQ.SERVER.%s.CONNZ", conn.Connz.ID), 1, nc)
-			if err == nats.ErrNoResponders {
-				return nil, fmt.Errorf("server request failed, ensure the account used has system privileges and appropriate permissions")
-			} else if err != nil {
+		res, err := doReq(req, "$SYS.REQ.SERVER.PING.CONNZ", c.waitFor, nc)
+		if err == nats.ErrNoResponders {
+			return nil, fmt.Errorf("server request failed, ensure the account used has system privileges and appropriate permissions")
+		} else if err != nil {
+			return nil, err
+		}
+
+		offset = 0
+
+		for _, c := range res {
+			conn, err := parseConnzResp(c)
+			if err != nil {
 				return nil, err
 			}
 
-			if len(res) != 1 {
-				return nil, fmt.Errorf("received %d responses from server %s expcting exactly 1", len(res), conn.Connz.ID)
+			found += len(conn.Connz.Conns)
+
+			if len(conn.Connz.Conns) == 0 {
+				continue
 			}
 
-			for _, c := range res {
-				co, err := parseConnzResp(c)
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, co)
-				found += len(co.Connz.Conns)
+			result = append(result, conn)
 
-				if co.Connz.Offset+co.Connz.Limit < co.Connz.Total {
-					incomplete = append(incomplete, co)
-				}
+			if conn.Connz.Offset+conn.Connz.Limit < conn.Connz.Total {
+				offset = conn.Connz.Offset + conn.Connz.Limit + 1
 			}
 		}
 	}

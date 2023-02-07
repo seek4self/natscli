@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,13 +17,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +30,7 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/emicklei/dot"
 	"github.com/google/go-cmp/cmp"
@@ -40,7 +39,6 @@ import (
 	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats.go"
 	"github.com/xlab/tablewriter"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type streamCmd struct {
@@ -69,11 +67,12 @@ type streamCmd struct {
 	reportSortConsumers   bool
 	reportSortMsgs        bool
 	reportSortName        bool
+	reportSortReverse     bool
 	reportSortStorage     bool
+	reportSort            string
 	reportRaw             bool
 	reportLimitCluster    string
 	reportLeaderDistrib   bool
-	maxStreams            int
 	discardPolicy         string
 	validateOnly          bool
 	backupDirectory       string
@@ -92,11 +91,22 @@ type streamCmd struct {
 	purgeSubject          string
 	purgeSequence         uint64
 	description           string
-	allowRollup           bool
-	denyDelete            bool
-	denyPurge             bool
 	repubSource           string
 	repubDest             string
+	repubHeadersOnly      bool
+	allowRollup           bool
+	allowRollupSet        bool
+	denyDelete            bool
+	denyDeleteSet         bool
+	denyPurge             bool
+	denyPurgeSet          bool
+	allowDirect           bool
+	allowDirectSet        bool
+	allowMirrorDirect     bool
+	allowMirrorDirectSet  bool
+	discardPerSubj        bool
+	discardPerSubjSet     bool
+	showStateOnly         bool
 
 	fServer    string
 	fCluster   string
@@ -138,7 +148,7 @@ type streamStat struct {
 func configureStreamCommand(app commandHost) {
 	c := &streamCmd{msgID: -1}
 
-	addCreateFlags := func(f *kingpin.CmdClause, edit bool) {
+	addCreateFlags := func(f *fisk.CmdClause, edit bool) {
 		f.Flag("subjects", "Subjects that are consumed by the Stream").Default().StringsVar(&c.subjects)
 		f.Flag("description", "Sets a contextual description for the stream").StringVar(&c.description)
 		if !edit {
@@ -148,90 +158,111 @@ func configureStreamCommand(app commandHost) {
 		f.Flag("tag", "Place the stream on servers that has specific tags (pass multiple times)").StringsVar(&c.placementTags)
 		f.Flag("tags", "Backward compatibility only, use --tag").Hidden().StringsVar(&c.placementTags)
 		f.Flag("cluster", "Place the stream on a specific cluster").StringVar(&c.placementCluster)
-		f.Flag("ack", "(--no-ack) Acknowledge publishes").Default("true").BoolVar(&c.ack)
-		f.Flag("retention", "Defines a retention policy (limits, interest, work)").EnumVar(&c.retentionPolicyS, "limits", "interest", "workq", "work")
+		f.Flag("ack", "Acknowledge publishes").Default("true").BoolVar(&c.ack)
+		if !edit {
+			f.Flag("retention", "Defines a retention policy (limits, interest, work)").EnumVar(&c.retentionPolicyS, "limits", "interest", "workq", "work")
+		}
 		f.Flag("discard", "Defines the discard policy (new, old)").EnumVar(&c.discardPolicy, "new", "old")
+		f.Flag("discard-per-subject", "Sets the 'new' discard policy and applies it to every subject in the stream").IsSetByUser(&c.discardPerSubjSet).BoolVar(&c.discardPerSubj)
 		f.Flag("max-age", "Maximum age of messages to keep").Default("").StringVar(&c.maxAgeLimit)
-		f.Flag("max-bytes", "Maximum bytes to keep").StringVar(&c.maxBytesLimitString)
+		f.Flag("max-bytes", "Maximum bytes to keep").PlaceHolder("BYTES").StringVar(&c.maxBytesLimitString)
 		f.Flag("max-consumers", "Maximum number of consumers to allow").Default("-1").IntVar(&c.maxConsumers)
-		f.Flag("max-msg-size", "Maximum size any 1 message may be").StringVar(&c.maxMsgSizeString)
+		f.Flag("max-msg-size", "Maximum size any 1 message may be").PlaceHolder("BYTES").StringVar(&c.maxMsgSizeString)
 		f.Flag("max-msgs", "Maximum amount of messages to keep").Default("0").Int64Var(&c.maxMsgLimit)
 		f.Flag("max-msgs-per-subject", "Maximum amount of messages to keep per subject").Default("0").Int64Var(&c.maxMsgPerSubjectLimit)
 		f.Flag("dupe-window", "Duration of the duplicate message tracking window").Default("").StringVar(&c.dupeWindow)
 		f.Flag("mirror", "Completely mirror another stream").StringVar(&c.mirror)
 		f.Flag("source", "Source data from other Streams, merging into this one").PlaceHolder("STREAM").StringsVar(&c.sources)
+		f.Flag("allow-rollup", "Allows roll-ups to be done by publishing messages with special headers").IsSetByUser(&c.allowRollupSet).BoolVar(&c.allowRollup)
+		f.Flag("deny-delete", "Deny messages from being deleted via the API").IsSetByUser(&c.denyDeleteSet).BoolVar(&c.denyDelete)
+		f.Flag("deny-purge", "Deny entire stream or subject purges via the API").IsSetByUser(&c.denyPurgeSet).BoolVar(&c.denyPurge)
+		f.Flag("allow-direct", "Allows fast, direct, access to stream data via the direct get API").IsSetByUser(&c.allowDirectSet).BoolVar(&c.allowDirect)
+		f.Flag("allow-mirror-direct", "Allows fast, direct, access to stream data via the direct get API on mirrors").IsSetByUser(&c.allowMirrorDirectSet).BoolVar(&c.allowMirrorDirect)
 
-		OptionalBoolean(f.Flag("allow-rollup", "(--no-allow-rollup) Allows roll-ups to be done by publishing messages with special headers"))
-		OptionalBoolean(f.Flag("deny-delete", "(--no-deny-delete) Deny messages from being deleted via the API"))
-		OptionalBoolean(f.Flag("deny-purge", "(--no-deny-purge) Deny entire stream or subject purges via the API"))
-
-		f.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+		f.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 
 		f.PreAction(c.parseLimitStrings)
 	}
 
 	str := app.Command("stream", "JetStream Stream management").Alias("str").Alias("st").Alias("ms").Alias("s")
-	str.Flag("all", "When listing or selecting streams show all streams including system ones").Short('a').BoolVar(&c.showAll)
-
-	strLs := str.Command("ls", "List all known Streams").Alias("list").Alias("l").Action(c.lsAction)
-	strLs.Flag("names", "Show just the stream names").Short('n').BoolVar(&c.listNames)
-	strLs.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
-
-	strReport := str.Command("report", "Reports on Stream statistics").Action(c.reportAction)
-	strReport.Flag("cluster", "Limit report to streams within a specific cluster").StringVar(&c.reportLimitCluster)
-	strReport.Flag("consumers", "Sort by number of Consumers").Short('o').BoolVar(&c.reportSortConsumers)
-	strReport.Flag("messages", "Sort by number of Messages").Short('m').BoolVar(&c.reportSortMsgs)
-	strReport.Flag("name", "Sort by Stream name").Short('n').BoolVar(&c.reportSortName)
-	strReport.Flag("storage", "Sort by Storage type").Short('t').BoolVar(&c.reportSortStorage)
-	strReport.Flag("raw", "Show un-formatted numbers").Short('r').BoolVar(&c.reportRaw)
-	strReport.Flag("dot", "Produce a GraphViz graph of replication topology").StringVar(&c.outFile)
-	strReport.Flag("leaders", "Show details about RAFT leaders").Short('l').BoolVar(&c.reportLeaderDistrib)
-
-	strFind := str.Command("find", "Finds streams matching certain criteria").Alias("query").Action(c.findAction)
-	strFind.Flag("server-name", "Display streams present on a regular expression matched server").StringVar(&c.fServer)
-	strFind.Flag("cluster", "Display streams present on a regular expression matched cluster").StringVar(&c.fCluster)
-	strFind.Flag("empty", "Display streams with no messages").BoolVar(&c.fEmpty)
-	strFind.Flag("idle", "Display streams with no new messages or consumer deliveries for a period").PlaceHolder("DURATION").DurationVar(&c.fIdle)
-	strFind.Flag("created", "Display streams created longer ago than duration").PlaceHolder("DURATION").DurationVar(&c.fCreated)
-	strFind.Flag("consumers", "Display streams with fewer consumers than threshold").PlaceHolder("THRESHOLD").Default("-1").IntVar(&c.fConsumers)
-	strFind.Flag("subject", "Filters Streams by those with interest matching a subject or wildcard").StringVar(&c.filterSubject)
-	strFind.Flag("names", "Show just the stream names").Short('n').BoolVar(&c.listNames)
-	strFind.Flag("invert", "Invert the check - before becomes after, with becomes without").BoolVar(&c.fInvert)
-
-	strInfo := str.Command("info", "Stream information").Alias("nfo").Alias("i").Action(c.infoAction)
-	strInfo.Arg("stream", "Stream to retrieve information for").StringVar(&c.stream)
-	strInfo.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+	str.Flag("all", "When listing or selecting streams show all streams including system ones").Short('a').UnNegatableBoolVar(&c.showAll)
+	addCheat("stream", str)
 
 	strAdd := str.Command("add", "Create a new Stream").Alias("create").Alias("new").Action(c.addAction)
 	strAdd.Arg("stream", "Stream name").StringVar(&c.stream)
 	strAdd.Flag("config", "JSON file to read configuration from").ExistingFileVar(&c.inputFile)
-	strAdd.Flag("validate", "Only validates the configuration against the official Schema").BoolVar(&c.validateOnly)
+	strAdd.Flag("validate", "Only validates the configuration against the official Schema").UnNegatableBoolVar(&c.validateOnly)
 	strAdd.Flag("output", "Save configuration instead of creating").PlaceHolder("FILE").StringVar(&c.outFile)
 	addCreateFlags(strAdd, false)
-	strAdd.Flag("republish-source", "Republish messages to --republish-destination").StringVar(&c.repubSource)
-	strAdd.Flag("republish-destination", "Republish destination for messages in --republish-source").StringVar(&c.repubDest)
+	strAdd.Flag("republish-source", "Republish messages to --republish-destination").PlaceHolder("SOURCE").StringVar(&c.repubSource)
+	strAdd.Flag("republish-destination", "Republish destination for messages in --republish-source").PlaceHolder("DEST").StringVar(&c.repubDest)
+	strAdd.Flag("republish-headers", "Republish only message headers, no bodies").UnNegatableBoolVar(&c.repubHeadersOnly)
+
+	strLs := str.Command("ls", "List all known Streams").Alias("list").Alias("l").Action(c.lsAction)
+	strLs.Flag("subject", "Limit the list to streams with matching subjects").StringVar(&c.filterSubject)
+	strLs.Flag("names", "Show just the stream names").Short('n').UnNegatableBoolVar(&c.listNames)
+	strLs.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+
+	strReport := str.Command("report", "Reports on Stream statistics").Action(c.reportAction)
+	strReport.Flag("subject", "Limit the report to streams with matching subjects").StringVar(&c.filterSubject)
+	strReport.Flag("cluster", "Limit report to streams within a specific cluster").StringVar(&c.reportLimitCluster)
+	strReport.Flag("consumers", "Sort by number of Consumers").Short('o').UnNegatableBoolVar(&c.reportSortConsumers)
+	strReport.Flag("messages", "Sort by number of Messages").Short('m').UnNegatableBoolVar(&c.reportSortMsgs)
+	strReport.Flag("name", "Sort by Stream name").Short('n').UnNegatableBoolVar(&c.reportSortName)
+	strReport.Flag("storage", "Sort by Storage type").Short('t').UnNegatableBoolVar(&c.reportSortStorage)
+	strReport.Flag("raw", "Show un-formatted numbers").Short('r').UnNegatableBoolVar(&c.reportRaw)
+	strReport.Flag("dot", "Produce a GraphViz graph of replication topology").StringVar(&c.outFile)
+	strReport.Flag("leaders", "Show details about RAFT leaders").Short('l').UnNegatableBoolVar(&c.reportLeaderDistrib)
+
+	strFind := str.Command("find", "Finds streams matching certain criteria").Alias("query").Action(c.findAction)
+	strFind.Flag("server-name", "Display streams present on a regular expression matched server").StringVar(&c.fServer)
+	strFind.Flag("cluster", "Display streams present on a regular expression matched cluster").StringVar(&c.fCluster)
+	strFind.Flag("empty", "Display streams with no messages").UnNegatableBoolVar(&c.fEmpty)
+	strFind.Flag("idle", "Display streams with no new messages or consumer deliveries for a period").PlaceHolder("DURATION").DurationVar(&c.fIdle)
+	strFind.Flag("created", "Display streams created longer ago than duration").PlaceHolder("DURATION").DurationVar(&c.fCreated)
+	strFind.Flag("consumers", "Display streams with fewer consumers than threshold").PlaceHolder("THRESHOLD").Default("-1").IntVar(&c.fConsumers)
+	strFind.Flag("subject", "Filters Streams by those with interest matching a subject or wildcard").StringVar(&c.filterSubject)
+	strFind.Flag("names", "Show just the stream names").Short('n').UnNegatableBoolVar(&c.listNames)
+	strFind.Flag("invert", "Invert the check - before becomes after, with becomes without").BoolVar(&c.fInvert)
+
+	strInfo := str.Command("info", "Stream information").Alias("nfo").Alias("i").Action(c.infoAction)
+	strInfo.Arg("stream", "Stream to retrieve information for").StringVar(&c.stream)
+	strInfo.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	strInfo.Flag("state", "Shows only the stream state").UnNegatableBoolVar(&c.showStateOnly)
+
+	strState := str.Command("state", "Stream state").Action(c.stateAction)
+	strState.Arg("stream", "Stream to retrieve state information for").StringVar(&c.stream)
+	strState.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+
+	strSubs := str.Command("subjects", "Query subjects held in a stream").Alias("subj").Action(c.subjectsAction)
+	strSubs.Arg("stream", "Stream name").StringVar(&c.stream)
+	strSubs.Arg("filter", "Limit the subjects to those matching a filter").Default(">").StringVar(&c.filterSubject)
+	strSubs.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	strSubs.Flag("sort", "Adjusts the sorting order (name, messages)").Default("messages").EnumVar(&c.reportSort, "name", "subjects", "messages", "count")
+	strSubs.Flag("reverse", "Reverse sort servers").Short('R').UnNegatableBoolVar(&c.reportSortReverse)
+	strSubs.Flag("names", "SList only subject names").BoolVar(&c.listNames)
 
 	strEdit := str.Command("edit", "Edits an existing stream").Alias("update").Action(c.editAction)
 	strEdit.Arg("stream", "Stream to retrieve edit").StringVar(&c.stream)
 	strEdit.Flag("config", "JSON file to read configuration from").ExistingFileVar(&c.inputFile)
-	strEdit.Flag("force", "Force edit without prompting").Short('f').BoolVar(&c.force)
+	strEdit.Flag("force", "Force edit without prompting").Short('f').UnNegatableBoolVar(&c.force)
 	strEdit.Flag("interactive", "Edit the configuring using your editor").Short('i').BoolVar(&c.interactive)
-	strEdit.Flag("dry-run", "Only shows differences, do not edit the stream").BoolVar(&c.dryRun)
+	strEdit.Flag("dry-run", "Only shows differences, do not edit the stream").UnNegatableBoolVar(&c.dryRun)
 	addCreateFlags(strEdit, true)
 
 	strRm := str.Command("rm", "Removes a Stream").Alias("delete").Alias("del").Action(c.rmAction)
 	strRm.Arg("stream", "Stream name").StringVar(&c.stream)
-	strRm.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
+	strRm.Flag("force", "Force removal without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
 	strPurge := str.Command("purge", "Purge a Stream without deleting it").Action(c.purgeAction)
 	strPurge.Arg("stream", "Stream name").StringVar(&c.stream)
-	strPurge.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
-	strPurge.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
+	strPurge.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	strPurge.Flag("force", "Force removal without prompting").Short('f').UnNegatableBoolVar(&c.force)
 	strPurge.Flag("subject", "Limits the purge to a specific subject").PlaceHolder("SUBJECT").StringVar(&c.purgeSubject)
 	strPurge.Flag("seq", "Purge up to but not including a specific message sequence").PlaceHolder("SEQUENCE").Uint64Var(&c.purgeSequence)
 	strPurge.Flag("keep", "Keeps a certain number of messages after the purge").PlaceHolder("MESSAGES").Uint64Var(&c.purgeKeep)
 
-	strCopy := str.Command("copy", "Creates a new Stream based on the configuration of another").Alias("cp").Action(c.cpAction)
+	strCopy := str.Command("copy", "Creates a new Stream based on the configuration of another, does not copy data").Alias("cp").Action(c.cpAction)
 	strCopy.Arg("source", "Source Stream to copy").Required().StringVar(&c.stream)
 	strCopy.Arg("destination", "New Stream to create").Required().StringVar(&c.destination)
 	addCreateFlags(strCopy, false)
@@ -239,27 +270,27 @@ func configureStreamCommand(app commandHost) {
 	strRmMsg := str.Command("rmm", "Securely removes an individual message from a Stream").Action(c.rmMsgAction)
 	strRmMsg.Arg("stream", "Stream name").StringVar(&c.stream)
 	strRmMsg.Arg("id", "Message Sequence to remove").Int64Var(&c.msgID)
-	strRmMsg.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
+	strRmMsg.Flag("force", "Force removal without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
 	strView := str.Command("view", "View messages in a stream").Action(c.viewAction)
 	strView.Arg("stream", "Stream name").StringVar(&c.stream)
 	strView.Arg("size", "Page size").Default("10").IntVar(&c.vwPageSize)
 	strView.Flag("id", "Start at a specific message Sequence").IntVar(&c.vwStartId)
-	strView.Flag("since", "Start at a time delta").DurationVar(&c.vwStartDelta)
-	strView.Flag("raw", "Show the raw data received").BoolVar(&c.vwRaw)
+	strView.Flag("since", "Delivers messages received since a duration like 1d3h5m2s").DurationVar(&c.vwStartDelta)
+	strView.Flag("raw", "Show the raw data received").UnNegatableBoolVar(&c.vwRaw)
 	strView.Flag("subject", "Filter the stream using a subject").StringVar(&c.vwSubject)
 
 	strGet := str.Command("get", "Retrieves a specific message from a Stream").Action(c.getAction)
 	strGet.Arg("stream", "Stream name").StringVar(&c.stream)
 	strGet.Arg("id", "Message Sequence to retrieve").Int64Var(&c.msgID)
 	strGet.Flag("last-for", "Retrieves the message for a specific subject").Short('S').PlaceHolder("SUBJECT").StringVar(&c.filterSubject)
-	strGet.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+	strGet.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 
 	strBackup := str.Command("backup", "Creates a backup of a Stream over the STHG-MS network").Alias("snapshot").Action(c.backupAction)
 	strBackup.Arg("stream", "Stream to backup").Required().StringVar(&c.stream)
 	strBackup.Arg("target", "Directory to create the backup in").Required().StringVar(&c.backupDirectory)
 	strBackup.Flag("progress", "Enables or disables progress reporting using a progress bar").Default("true").BoolVar(&c.showProgress)
-	strBackup.Flag("check", "Checks the Stream for health prior to backup").Default("false").BoolVar(&c.healthCheck)
+	strBackup.Flag("check", "Checks the Stream for health prior to backup").UnNegatableBoolVar(&c.healthCheck)
 	strBackup.Flag("consumers", "Enable or disable consumer backups").Default("true").BoolVar(&c.snapShotConsumers)
 
 	strRestore := str.Command("restore", "Restore a Stream over the STHG-MS network").Action(c.restoreAction)
@@ -271,7 +302,7 @@ func configureStreamCommand(app commandHost) {
 
 	strSeal := str.Command("seal", "Seals a stream preventing further updates").Action(c.sealAction)
 	strSeal.Arg("stream", "The name of the Stream to seal").Required().StringVar(&c.stream)
-	strSeal.Flag("force", "Force sealing without prompting").Short('f').BoolVar(&c.force)
+	strSeal.Flag("force", "Force sealing without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
 	strCluster := str.Command("cluster", "Manages a clustered Stream").Alias("c")
 	strClusterDown := strCluster.Command("step-down", "Force a new leader election by standing down the current leader").Alias("stepdown").Alias("sd").Alias("elect").Alias("down").Alias("d").Action(c.leaderStandDown)
@@ -280,83 +311,89 @@ func configureStreamCommand(app commandHost) {
 	strClusterRemovePeer := strCluster.Command("peer-remove", "Removes a peer from the Stream cluster").Alias("pr").Action(c.removePeer)
 	strClusterRemovePeer.Arg("stream", "The stream to act on").StringVar(&c.stream)
 	strClusterRemovePeer.Arg("peer", "The name of the peer to remove").StringVar(&c.peerName)
-
-	strTemplate := str.Command("template", "Manages Stream Templates").Alias("templ").Alias("t")
-
-	strTAdd := strTemplate.Command("create", "Creates a new Stream Template").Alias("add").Alias("new").Action(c.streamTemplateAdd)
-	strTAdd.Arg("stream", "Template name").StringVar(&c.stream)
-	strTAdd.Flag("max-streams", "Maximum amount of streams that this template can generate").Default("-1").IntVar(&c.maxStreams)
-	addCreateFlags(strTAdd, false)
-
-	strTInfo := strTemplate.Command("info", "Stream Template information").Alias("nfo").Alias("i").Action(c.streamTemplateInfo)
-	strTInfo.Arg("template", "Stream Template to retrieve information for").StringVar(&c.stream)
-	strTInfo.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
-
-	strTLs := strTemplate.Command("ls", "List all known Stream Templates").Alias("list").Alias("l").Action(c.streamTemplateLs)
-	strTLs.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
-
-	strTRm := strTemplate.Command("rm", "Removes a Stream Template").Alias("delete").Alias("del").Action(c.streamTemplateRm)
-	strTRm.Arg("template", "Stream Template name").StringVar(&c.stream)
-	strTRm.Flag("force", "Force removal without prompting").Short('f').BoolVar(&c.force)
-
-	cheats["stream"] = `# Adding, Removing, Viewing a Stream
-ms-client stream add
-ms-client stream info STREAMNAME
-ms-client stream rm STREAMNAME
-
-# Editing a single property of a stream
-ms-client stream edit STREAMNAME --description "new description"
-# Editing a stream configuration in your editor
-EDITOR=vi ms-client stream edit -i STREAMNAME
-
-# Show a list of streams, including basic info or compatible with pipes
-ms-client stream list
-ms-client stream list -n
-
-# Find all empty streams or streams with messages
-ms-client stream find --empty
-ms-client stream find --empty --invert
-
-# Creates a new Stream based on the config of another, does not copy data
-ms-client stream copy ORDERS ARCHIVE --description "Orders Archive" --subjects ARCHIVE
-
-# Get message 12344, delete a message, delete all messages
-ms-client stream get ORDERS 12345
-ms-client stream rmm ORDERS 12345
-
-# Purge messages from streams
-ms-client stream purge ORDERS
-# deletes up to, but not including, 1000
-ms-client stream purge ORDERS --seq 1000
-ms-client stream purge ORDERS --keep 100
-ms-client stream purge ORDERS --subject one.subject
-
-# Page through a stream
-ms-client stream view ORDERS
-ms-client stream view --id 1000
-ms-client stream view --since 1h
-ms-client stream view --subject one.subject
-
-# Backup and restore
-ms-client stream backup ORDERS backups/orders/$(date +%Y-%m-%d)
-ms-client stream restore ORDERS backups/orders/$(date +%Y-%m-%d)
-
-# Marks a stream as read only
-ms-client stream seal ORDERS
-
-# Force a cluster leader election
-ms-client stream cluster ORDERS down
-
-# Evict the stream from a node
-stream cluster peer-remove ORDERS nats1.example.net
-`
 }
 
 func init() {
 	registerCommand("stream", 16, configureStreamCommand)
 }
 
-func (c *streamCmd) parseLimitStrings(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) subjectsAction(_ *fisk.ParseContext) (err error) {
+	asked := c.connectAndAskStream()
+
+	subs, err := c.mgr.StreamContainedSubjects(c.stream, c.filterSubject)
+	if err != nil {
+		return err
+	}
+
+	if c.json {
+		printJSON(subs)
+		return nil
+	}
+
+	if asked {
+		fmt.Println()
+	}
+
+	if len(subs) == 0 {
+		fmt.Printf("No subjects found matching %s\n", c.filterSubject)
+		return nil
+	}
+
+	var longest int
+	var most uint64
+	var names []string
+
+	for s, c := range subs {
+		names = append(names, s)
+		if len(s) > longest {
+			longest = len(s)
+		}
+		if c > most {
+			most = c
+		}
+	}
+
+	cols := 1
+	format := fmt.Sprintf("  %%%ds: %%s\n", longest)
+	countWidth := len(humanize.Comma(int64(most)))
+	switch {
+	case longest+countWidth < 20:
+		cols = 3
+		format = fmt.Sprintf("  %%20s: %%%ds %%20s: %%%ds %%20s: %%%ds\n", countWidth, countWidth, countWidth)
+	case longest+countWidth < 30:
+		cols = 2
+		format = fmt.Sprintf("  %%30s: %%%ds %%30s: %%%ds\n", countWidth, countWidth)
+	}
+
+	sort.Slice(names, func(i, j int) bool {
+		if c.reportSort == "name" || c.reportSort == "subjects" {
+			return c.boolReverse(names[i] < names[j])
+		} else {
+			return c.boolReverse(subs[names[i]] < subs[names[j]])
+		}
+	})
+
+	if c.listNames {
+		for _, n := range names {
+			fmt.Println(n)
+		}
+		return
+	}
+
+	sliceGroups(names, cols, func(g []string) {
+		if cols == 1 {
+			fmt.Printf(format, g[0], humanize.Comma(int64(subs[g[0]])))
+		} else if cols == 2 {
+			fmt.Printf(format, g[0], humanize.Comma(int64(subs[g[0]])), g[1], humanize.Comma(int64(subs[g[1]])))
+		} else {
+			fmt.Printf(format, g[0], humanize.Comma(int64(subs[g[0]])), g[1], humanize.Comma(int64(subs[g[1]])), g[2], humanize.Comma(int64(subs[g[2]])))
+		}
+	})
+
+	return nil
+}
+
+func (c *streamCmd) parseLimitStrings(_ *fisk.ParseContext) (err error) {
 	if c.maxBytesLimitString != "" {
 		c.maxBytesLimit, err = parseStringAsBytes(c.maxBytesLimitString)
 		if err != nil {
@@ -374,7 +411,7 @@ func (c *streamCmd) parseLimitStrings(_ *kingpin.ParseContext) (err error) {
 	return nil
 }
 
-func (c *streamCmd) findAction(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) findAction(_ *fisk.ParseContext) (err error) {
 	c.nc, c.mgr, err = prepareHelper("", natsOpts()...)
 	if err != nil {
 		return fmt.Errorf("setup failed: %v", err)
@@ -437,7 +474,7 @@ func (c *streamCmd) loadStream(stream string) (*jsm.Stream, error) {
 	return c.mgr.LoadStream(stream)
 }
 
-func (c *streamCmd) leaderStandDown(_ *kingpin.ParseContext) error {
+func (c *streamCmd) leaderStandDown(_ *fisk.ParseContext) error {
 	c.connectAndAskStream()
 
 	stream, err := c.loadStream(c.stream)
@@ -455,6 +492,10 @@ func (c *streamCmd) leaderStandDown(_ *kingpin.ParseContext) error {
 	}
 
 	leader := info.Cluster.Leader
+	if leader == "" {
+		return fmt.Errorf("stream has no current leader")
+	}
+
 	log.Printf("Requesting leader step down of %q in a %d peer RAFT group", leader, len(info.Cluster.Replicas)+1)
 	err = stream.LeaderStepDown()
 	if err != nil {
@@ -463,8 +504,8 @@ func (c *streamCmd) leaderStandDown(_ *kingpin.ParseContext) error {
 
 	ctr := 0
 	start := time.Now()
-	for range time.NewTimer(500 * time.Millisecond).C {
-		if ctr == 5 {
+	for range time.NewTicker(500 * time.Millisecond).C {
+		if ctr == 10 {
 			return fmt.Errorf("stream did not elect a new leader in time")
 		}
 		ctr++
@@ -472,6 +513,11 @@ func (c *streamCmd) leaderStandDown(_ *kingpin.ParseContext) error {
 		info, err = stream.Information()
 		if err != nil {
 			log.Printf("Failed to retrieve Stream State: %s", err)
+			continue
+		}
+
+		if info.Cluster.Leader == "" {
+			log.Printf("No leader elected")
 			continue
 		}
 
@@ -489,7 +535,7 @@ func (c *streamCmd) leaderStandDown(_ *kingpin.ParseContext) error {
 	return c.showStream(stream)
 }
 
-func (c *streamCmd) removePeer(_ *kingpin.ParseContext) error {
+func (c *streamCmd) removePeer(_ *fisk.ParseContext) error {
 	c.connectAndAskStream()
 
 	stream, err := c.loadStream(c.stream)
@@ -533,7 +579,7 @@ func (c *streamCmd) removePeer(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *streamCmd) viewAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) viewAction(_ *fisk.ParseContext) error {
 	if c.vwPageSize > 25 {
 		c.vwPageSize = 25
 	}
@@ -635,12 +681,12 @@ func (c *streamCmd) viewAction(_ *kingpin.ParseContext) error {
 	}
 }
 
-func (c *streamCmd) sealAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) sealAction(_ *fisk.ParseContext) error {
 	c.connectAndAskStream()
 
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really seal Stream %s, sealed streams can not be unsealed or modified", c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -648,30 +694,30 @@ func (c *streamCmd) sealAction(_ *kingpin.ParseContext) error {
 	}
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not seal Stream")
+	fisk.FatalIfError(err, "could not seal Stream")
 
 	stream.Seal()
-	kingpin.FatalIfError(err, "could not seal Stream")
+	fisk.FatalIfError(err, "could not seal Stream")
 
 	return c.showStream(stream)
 }
 
-func (c *streamCmd) restoreAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) restoreAction(_ *fisk.ParseContext) error {
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	var bm api.JSApiStreamRestoreRequest
 	bmj, err := os.ReadFile(filepath.Join(c.backupDirectory, "backup.json"))
-	kingpin.FatalIfError(err, "restore failed")
+	fisk.FatalIfError(err, "restore failed")
 	err = json.Unmarshal(bmj, &bm)
-	kingpin.FatalIfError(err, "restore failed")
+	fisk.FatalIfError(err, "restore failed")
 
 	var cfg *api.StreamConfig
 
 	known, err := mgr.IsKnownStream(bm.Config.Name)
-	kingpin.FatalIfError(err, "Could not check if the stream already exist")
+	fisk.FatalIfError(err, "Could not check if the stream already exist")
 	if known {
-		kingpin.Fatalf("Stream %q already exist", bm.Config.Name)
+		fisk.Fatalf("Stream %q already exist", bm.Config.Name)
 	}
 
 	var progress *uiprogress.Bar
@@ -727,7 +773,7 @@ func (c *streamCmd) restoreAction(_ *kingpin.ParseContext) error {
 	fmt.Printf("Starting restore of Stream %q from file %q\n\n", bm.Config.Name, c.backupDirectory)
 
 	fp, _, err := mgr.RestoreSnapshotFromDirectory(ctx, bm.Config.Name, c.backupDirectory, opts...)
-	kingpin.FatalIfError(err, "restore failed")
+	fisk.FatalIfError(err, "restore failed")
 	if c.showProgress {
 		progress.Set(int(fp.ChunksSent()))
 		uiprogress.Stop()
@@ -738,9 +784,9 @@ func (c *streamCmd) restoreAction(_ *kingpin.ParseContext) error {
 	fmt.Println()
 
 	stream, err := mgr.LoadStream(bm.Config.Name)
-	kingpin.FatalIfError(err, "could not request Stream info")
+	fisk.FatalIfError(err, "could not request Stream info")
 	err = c.showStream(stream)
-	kingpin.FatalIfError(err, "could not show stream")
+	fisk.FatalIfError(err, "could not show stream")
 
 	return nil
 }
@@ -753,6 +799,17 @@ func backupStream(stream *jsm.Stream, showProgress bool, consumers bool, check b
 	var bps uint64
 	var progress *uiprogress.Progress
 	expected := 1
+	timedOut := false
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	timeout := time.AfterFunc(5*time.Second, func() {
+		cancel()
+		timedOut = true
+	})
+
+	var received uint32
 
 	cb := func(p jsm.SnapshotProgress) {
 		if bar == nil && showProgress {
@@ -776,6 +833,11 @@ func backupStream(stream *jsm.Stream, showProgress bool, consumers bool, check b
 			}
 
 			first = false
+		}
+
+		if p.ChunksReceived() != received {
+			timeout.Reset(5 * time.Second)
+			received = p.ChunksReceived()
 		}
 
 		bps = p.BytesPerSecond()
@@ -828,16 +890,21 @@ func backupStream(stream *jsm.Stream, showProgress bool, consumers bool, check b
 	pmu.Unlock()
 
 	fmt.Println()
-	fmt.Printf("Received %s compressed data in %d chunks for stream %q in %v, %s uncompressed \n", humanize.IBytes(fp.BytesReceived()), fp.ChunksReceived(), stream.Name(), fp.EndTime().Sub(fp.StartTime()).Round(time.Millisecond), humanize.IBytes(fp.UncompressedBytesReceived()))
+
+	if timedOut {
+		return fmt.Errorf("backup timed out after receiving no data for a long period")
+	}
+
+	fmt.Printf("Received %s compressed data in %s chunks for stream %q in %v, %s uncompressed \n", humanize.IBytes(fp.BytesReceived()), humanize.Comma(int64(fp.ChunksReceived())), stream.Name(), fp.EndTime().Sub(fp.StartTime()).Round(time.Millisecond), humanize.IBytes(fp.UncompressedBytesReceived()))
 
 	return nil
 }
 
-func (c *streamCmd) backupAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) backupAction(_ *fisk.ParseContext) error {
 	var err error
 
 	c.nc, c.mgr, err = prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	stream, err := c.loadStream(c.stream)
 	if err != nil {
@@ -845,131 +912,14 @@ func (c *streamCmd) backupAction(_ *kingpin.ParseContext) error {
 	}
 
 	err = backupStream(stream, c.showProgress, c.snapShotConsumers, c.healthCheck, c.backupDirectory)
-	kingpin.FatalIfError(err, "snapshot failed")
+	fisk.FatalIfError(err, "snapshot failed")
 
 	return nil
 }
 
-func (c *streamCmd) streamTemplateRm(_ *kingpin.ParseContext) error {
+func (c *streamCmd) reportAction(_ *fisk.ParseContext) error {
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
-
-	c.stream, err = selectStreamTemplate(mgr, c.stream, c.force)
-	kingpin.FatalIfError(err, "could not pick a Stream Template to operate on")
-
-	template, err := mgr.LoadStreamTemplate(c.stream)
-	kingpin.FatalIfError(err, "could not load Stream Template")
-
-	if !c.force {
-		ok, err := askConfirmation(fmt.Sprintf("Really delete Stream Template %q, this will remove all managed Streams this template created as well", c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
-
-		if !ok {
-			return nil
-		}
-	}
-
-	err = template.Delete()
-	kingpin.FatalIfError(err, "could not delete Stream Template")
-
-	return nil
-}
-
-func (c *streamCmd) streamTemplateAdd(pc *kingpin.ParseContext) (err error) {
-	cfg := c.prepareConfig(pc, false)
-
-	if c.maxStreams == -1 {
-		err = askOne(&survey.Input{
-			Message: "Maximum Streams",
-		}, &c.maxStreams, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
-	}
-
-	if c.maxStreams < 0 {
-		kingpin.Fatalf("Maximum Streams can not be negative")
-	}
-
-	cfg.Name = ""
-
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "could not create Stream")
-
-	_, err = mgr.NewStreamTemplate(c.stream, uint32(c.maxStreams), cfg)
-	kingpin.FatalIfError(err, "could not create Stream Template")
-
-	fmt.Printf("Stream Template %s was created\n\n", c.stream)
-
-	return c.streamTemplateInfo(pc)
-}
-
-func (c *streamCmd) streamTemplateInfo(_ *kingpin.ParseContext) error {
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
-
-	c.stream, err = selectStreamTemplate(mgr, c.stream, c.force)
-	kingpin.FatalIfError(err, "could not pick a Stream Template to operate on")
-
-	info, err := mgr.LoadStreamTemplate(c.stream)
-	kingpin.FatalIfError(err, "could not load Stream Template %q", c.stream)
-
-	if c.json {
-		err = printJSON(info.Configuration())
-		kingpin.FatalIfError(err, "could not display info")
-		return nil
-	}
-
-	fmt.Printf("Information for Stream Template %s\n", c.stream)
-	fmt.Println()
-	c.showStreamConfig(info.StreamConfiguration())
-	fmt.Printf("      Maximum Streams: %d\n", info.MaxStreams())
-	fmt.Println()
-	fmt.Println("Managed Streams:")
-	fmt.Println()
-	if len(info.Streams()) == 0 {
-		fmt.Println("  No Streams have been defined by this template")
-	} else {
-		managed := info.Streams()
-		sort.Strings(managed)
-		for _, n := range managed {
-			fmt.Printf("    %s\n", n)
-		}
-	}
-	fmt.Println()
-
-	return nil
-}
-
-func (c *streamCmd) streamTemplateLs(_ *kingpin.ParseContext) error {
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
-
-	names, err := mgr.StreamTemplateNames()
-	kingpin.FatalIfError(err, "could not list Stream Templates")
-
-	if c.json {
-		err = printJSON(names)
-		kingpin.FatalIfError(err, "could not display Stream Templates")
-		return nil
-	}
-
-	if len(names) == 0 {
-		fmt.Println("No Streams Templates defined")
-		return nil
-	}
-
-	fmt.Println("Stream Templates:")
-	fmt.Println()
-	for _, t := range names {
-		fmt.Printf("\t%s\n", t)
-	}
-	fmt.Println()
-
-	return nil
-}
-
-func (c *streamCmd) reportAction(_ *kingpin.ParseContext) error {
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	if !c.json {
 		fmt.Print("Obtaining Stream stats\n\n")
@@ -978,13 +928,18 @@ func (c *streamCmd) reportAction(_ *kingpin.ParseContext) error {
 	stats := []streamStat{}
 	leaders := make(map[string]*raftLeader)
 	showReplication := false
+	var filter *jsm.StreamNamesFilter
+
+	if c.filterSubject != "" {
+		filter = &jsm.StreamNamesFilter{Subject: c.filterSubject}
+	}
 
 	dg := dot.NewGraph(dot.Directed)
 	dg.Label("Stream Replication Structure")
 
-	err = mgr.EachStream(func(stream *jsm.Stream) {
+	err = mgr.EachStream(filter, func(stream *jsm.Stream) {
 		info, err := stream.LatestInformation()
-		kingpin.FatalIfError(err, "could not get stream info for %s", stream.Name())
+		fisk.FatalIfError(err, "could not get stream info for %s", stream.Name())
 
 		if info.Cluster != nil {
 			if c.reportLimitCluster != "" && info.Cluster.Name != c.reportLimitCluster {
@@ -1085,7 +1040,7 @@ func (c *streamCmd) reportAction(_ *kingpin.ParseContext) error {
 		c.renderReplication(stats)
 
 		if c.outFile != "" {
-			ioutil.WriteFile(c.outFile, []byte(dg.String()), 0644)
+			os.WriteFile(c.outFile, []byte(dg.String()), 0644)
 		}
 	}
 
@@ -1178,7 +1133,7 @@ func (c *streamCmd) renderStreams(stats []streamStat) {
 }
 
 func (c *streamCmd) loadConfigFile(file string) (*api.StreamConfig, error) {
-	f, err := ioutil.ReadFile(file)
+	f, err := os.ReadFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,7 +1145,7 @@ func (c *streamCmd) loadConfigFile(file string) (*api.StreamConfig, error) {
 	// by checking if there's a config key then extract that, else
 	// we try loading it as a StreamConfig
 
-	var nfo map[string]interface{}
+	var nfo map[string]any
 	err = json.Unmarshal(f, &nfo)
 	if err != nil {
 		return nil, err
@@ -1218,7 +1173,7 @@ func (c *streamCmd) loadConfigFile(file string) (*api.StreamConfig, error) {
 	return &cfg, nil
 }
 
-func (c *streamCmd) copyAndEditStream(cfg api.StreamConfig) (api.StreamConfig, error) {
+func (c *streamCmd) copyAndEditStream(cfg api.StreamConfig, pc *fisk.ParseContext) (api.StreamConfig, error) {
 	var err error
 
 	if c.inputFile != "" {
@@ -1241,7 +1196,7 @@ func (c *streamCmd) copyAndEditStream(cfg api.StreamConfig) (api.StreamConfig, e
 	}
 
 	if len(c.subjects) > 0 {
-		cfg.Subjects = c.splitCLISubjects()
+		cfg.Subjects = splitCLISubjects(c.subjects)
 	}
 
 	if c.storage != "" {
@@ -1319,14 +1274,28 @@ func (c *streamCmd) copyAndEditStream(cfg api.StreamConfig) (api.StreamConfig, e
 		cfg.Description = c.description
 	}
 
-	if c.allowRollup {
-		cfg.RollupAllowed = true
+	if c.allowRollupSet {
+		cfg.RollupAllowed = c.allowRollup
 	}
-	if c.denyPurge {
-		cfg.DenyPurge = true
+
+	if c.denyPurgeSet {
+		cfg.DenyPurge = c.denyPurge
 	}
-	if c.denyDelete {
-		cfg.DenyDelete = true
+
+	if c.denyDeleteSet {
+		cfg.DenyDelete = c.denyDelete
+	}
+
+	if c.allowDirectSet {
+		cfg.AllowDirect = c.allowDirect
+	}
+
+	if c.allowMirrorDirectSet {
+		cfg.MirrorDirect = c.allowMirrorDirectSet
+	}
+
+	if c.discardPerSubjSet {
+		cfg.DiscardNewPer = c.discardPerSubj
 	}
 
 	return cfg, nil
@@ -1343,7 +1312,7 @@ func (c *streamCmd) interactiveEdit(cfg api.StreamConfig) (api.StreamConfig, err
 		return api.StreamConfig{}, fmt.Errorf("could not create temporary file: %s", err)
 	}
 
-	tfile, err := ioutil.TempFile("", "")
+	tfile, err := os.CreateTemp("", "")
 	if err != nil {
 		return api.StreamConfig{}, fmt.Errorf("could not create temporary file: %s", err)
 	}
@@ -1374,11 +1343,11 @@ func (c *streamCmd) interactiveEdit(cfg api.StreamConfig) (api.StreamConfig, err
 	return *ncfg, nil
 }
 
-func (c *streamCmd) editAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) editAction(pc *fisk.ParseContext) error {
 	c.connectAndAskStream()
 
 	sourceStream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not request Stream %s configuration", c.stream)
+	fisk.FatalIfError(err, "could not request Stream %s configuration", c.stream)
 
 	// lazy deep copy
 	input := sourceStream.Configuration()
@@ -1394,10 +1363,10 @@ func (c *streamCmd) editAction(_ *kingpin.ParseContext) error {
 
 	if c.interactive {
 		cfg, err = c.interactiveEdit(cfg)
-		kingpin.FatalIfError(err, "could not create new configuration for Stream %s", c.stream)
+		fisk.FatalIfError(err, "could not create new configuration for Stream %s", c.stream)
 	} else {
-		cfg, err = c.copyAndEditStream(cfg)
-		kingpin.FatalIfError(err, "could not create new configuration for Stream %s", c.stream)
+		cfg, err = c.copyAndEditStream(cfg, pc)
+		fisk.FatalIfError(err, "could not create new configuration for Stream %s", c.stream)
 	}
 
 	// sorts strings to subject lists that only differ in ordering is considered equal
@@ -1423,7 +1392,7 @@ func (c *streamCmd) editAction(_ *kingpin.ParseContext) error {
 
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really edit Stream %s", c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -1431,7 +1400,7 @@ func (c *streamCmd) editAction(_ *kingpin.ParseContext) error {
 	}
 
 	err = sourceStream.UpdateConfiguration(cfg)
-	kingpin.FatalIfError(err, "could not edit Stream %s", c.stream)
+	fisk.FatalIfError(err, "could not edit Stream %s", c.stream)
 
 	if !c.json {
 		fmt.Printf("Stream %s was updated\n\n", c.stream)
@@ -1442,15 +1411,15 @@ func (c *streamCmd) editAction(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *streamCmd) cpAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) cpAction(pc *fisk.ParseContext) error {
 	if c.stream == c.destination {
-		kingpin.Fatalf("source and destination Stream names cannot be the same")
+		fisk.Fatalf("source and destination Stream names cannot be the same")
 	}
 
 	c.connectAndAskStream()
 
 	sourceStream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not request Stream %s configuration", c.stream)
+	fisk.FatalIfError(err, "could not request Stream %s configuration", c.stream)
 
 	// lazy deep copy
 	input := sourceStream.Configuration()
@@ -1464,13 +1433,13 @@ func (c *streamCmd) cpAction(_ *kingpin.ParseContext) error {
 		return err
 	}
 
-	cfg, err = c.copyAndEditStream(cfg)
-	kingpin.FatalIfError(err, "could not copy Stream %s", c.stream)
+	cfg, err = c.copyAndEditStream(cfg, pc)
+	fisk.FatalIfError(err, "could not copy Stream %s", c.stream)
 
 	cfg.Name = c.destination
 
 	newStream, err := c.mgr.NewStreamFromDefault(cfg.Name, cfg)
-	kingpin.FatalIfError(err, "could not create Stream")
+	fisk.FatalIfError(err, "could not create Stream")
 
 	if !c.json {
 		fmt.Printf("Stream %s was created\n\n", c.stream)
@@ -1482,31 +1451,67 @@ func (c *streamCmd) cpAction(_ *kingpin.ParseContext) error {
 }
 
 func (c *streamCmd) showStreamConfig(cfg api.StreamConfig) {
-	fmt.Println("Configuration:")
-	fmt.Println()
 	if cfg.Description != "" {
 		fmt.Printf("          Description: %s\n", cfg.Description)
 	}
 	if len(cfg.Subjects) > 0 {
 		fmt.Printf("             Subjects: %s\n", strings.Join(cfg.Subjects, ", "))
 	}
+	fmt.Printf("             Replicas: %d\n", cfg.Replicas)
 	if cfg.Sealed {
 		fmt.Printf("               Sealed: true\n")
 	}
+	fmt.Printf("              Storage: %s\n", cfg.Storage.String())
+	if cfg.Placement != nil {
+		if cfg.Placement.Cluster != "" {
+			fmt.Printf("    Placement Cluster: %s\n", cfg.Placement.Cluster)
+		}
+		if len(cfg.Placement.Tags) > 0 {
+			fmt.Printf("       Placement Tags: %s\n", strings.Join(cfg.Placement.Tags, ", "))
+		}
+	}
+	if cfg.RePublish != nil {
+		if cfg.RePublish.HeadersOnly {
+			fmt.Printf(" Republishing Headers: %s to %s", cfg.RePublish.Source, cfg.RePublish.Destination)
+		} else {
+			fmt.Printf("         Republishing: %s to %s", cfg.RePublish.Source, cfg.RePublish.Destination)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println()
+
+	fmt.Printf("            Retention: %s\n", cfg.Retention.String())
 	fmt.Printf("     Acknowledgements: %v\n", !cfg.NoAck)
-	fmt.Printf("            Retention: %s - %s\n", cfg.Storage.String(), cfg.Retention.String())
-	fmt.Printf("             Replicas: %d\n", cfg.Replicas)
-	fmt.Printf("       Discard Policy: %s\n", cfg.Discard.String())
+	dnp := cfg.Discard.String()
+	if cfg.DiscardNewPer {
+		dnp = "New Per Subject"
+	}
+	fmt.Printf("       Discard Policy: %s\n", dnp)
 	fmt.Printf("     Duplicate Window: %v\n", cfg.Duplicates)
+	if cfg.AllowDirect {
+		fmt.Printf("           Direct Get: %t\n", cfg.AllowDirect)
+	}
+	if cfg.MirrorDirect {
+		fmt.Printf("    Mirror Direct Get: %t\n", cfg.MirrorDirect)
+	}
 	fmt.Printf("    Allows Msg Delete: %v\n", !cfg.DenyDelete)
 	fmt.Printf("         Allows Purge: %v\n", !cfg.DenyPurge)
 	fmt.Printf("       Allows Rollups: %v\n", cfg.RollupAllowed)
+
+	fmt.Println()
+	fmt.Println("Limits:")
+	fmt.Println()
+
 	if cfg.MaxMsgs == -1 {
 		fmt.Println("     Maximum Messages: unlimited")
 	} else {
 		fmt.Printf("     Maximum Messages: %s\n", humanize.Comma(cfg.MaxMsgs))
 	}
-	if cfg.MaxMsgsPer > 0 {
+	if cfg.MaxMsgsPer <= 0 {
+		fmt.Println("  Maximum Per Subject: unlimited")
+	} else {
 		fmt.Printf("  Maximum Per Subject: %s\n", humanize.Comma(cfg.MaxMsgsPer))
 	}
 	if cfg.MaxBytes == -1 {
@@ -1527,25 +1532,22 @@ func (c *streamCmd) showStreamConfig(cfg api.StreamConfig) {
 	if cfg.MaxConsumers == -1 {
 		fmt.Println("    Maximum Consumers: unlimited")
 	} else {
-		fmt.Printf("    Maximum Consumers: %d\n", cfg.MaxConsumers)
+		fmt.Printf("    Maximum Consumers: %s\n", humanize.Comma(int64(cfg.MaxConsumers)))
 	}
 	if cfg.Template != "" {
 		fmt.Printf("  Managed by Template: %s\n", cfg.Template)
 	}
-	if cfg.Placement != nil {
-		if cfg.Placement.Cluster != "" {
-			fmt.Printf("    Placement Cluster: %s\n", cfg.Placement.Cluster)
-		}
-		if len(cfg.Placement.Tags) > 0 {
-			fmt.Printf("       Placement Tags: %s\n", strings.Join(cfg.Placement.Tags, ", "))
-		}
+
+	if cfg.Mirror != nil || len(cfg.Sources) > 0 {
+		fmt.Println()
+		fmt.Println("Replication:")
+		fmt.Println()
 	}
-	if cfg.RePublish != nil {
-		fmt.Printf("         Republishing: %s to %s", cfg.RePublish.Source, cfg.RePublish.Destination)
-	}
+
 	if cfg.Mirror != nil {
 		fmt.Printf("               Mirror: %s\n", c.renderSource(cfg.Mirror))
 	}
+
 	if len(cfg.Sources) > 0 {
 		fmt.Printf("              Sources: ")
 		sort.Slice(cfg.Sources, func(i, j int) bool {
@@ -1577,8 +1579,12 @@ func (c *streamCmd) renderSource(s *api.StreamSource) string {
 		parts = append(parts, fmt.Sprintf("Subject: %s", s.FilterSubject))
 	}
 	if s.External != nil {
-		parts = append(parts, fmt.Sprintf("API Prefix: %s", s.External.ApiPrefix))
-		parts = append(parts, fmt.Sprintf("Delivery Prefix: %s", s.External.DeliverPrefix))
+		if s.External.ApiPrefix != "" {
+			parts = append(parts, fmt.Sprintf("API Prefix: %s", s.External.ApiPrefix))
+		}
+		if s.External.DeliverPrefix != "" {
+			parts = append(parts, fmt.Sprintf("Delivery Prefix: %s", s.External.DeliverPrefix))
+		}
 	}
 
 	return strings.Join(parts, ", ")
@@ -1598,14 +1604,19 @@ func (c *streamCmd) showStream(stream *jsm.Stream) error {
 func (c *streamCmd) showStreamInfo(info *api.StreamInfo) {
 	if c.json {
 		err := printJSON(info)
-		kingpin.FatalIfError(err, "could not display info")
+		fisk.FatalIfError(err, "could not display info")
 		return
 	}
 
-	fmt.Printf("Information for Stream %s created %s\n", c.stream, info.Created.Local().Format(time.RFC3339))
-	fmt.Println()
-	c.showStreamConfig(info.Config)
-	fmt.Println()
+	if !c.showStateOnly {
+		fmt.Printf("Information for Stream %s created %s\n", c.stream, info.Created.Local().Format("2006-01-02 15:04:05"))
+		fmt.Println()
+		c.showStreamConfig(info.Config)
+		fmt.Println()
+	} else {
+		fmt.Printf("State for Stream %s created %s\n", c.stream, info.Created.Local().Format("2006-01-02 15:04:05"))
+		fmt.Println()
+	}
 
 	if info.Cluster != nil && info.Cluster.Name != "" {
 		fmt.Println("Cluster Information:")
@@ -1635,7 +1646,7 @@ func (c *streamCmd) showStreamInfo(info *api.StreamInfo) {
 			case r.Lag > 1:
 				state = append(state, fmt.Sprintf("%s operations behind", humanize.Comma(int64(r.Lag))))
 			case r.Lag == 1:
-				state = append(state, fmt.Sprintf("%d operation behind", r.Lag))
+				state = append(state, fmt.Sprintf("%s operation behind", humanize.Comma(int64(r.Lag))))
 			}
 
 			fmt.Printf("              Replica: %s\n", strings.Join(state, ", "))
@@ -1699,12 +1710,16 @@ func (c *streamCmd) showStreamInfo(info *api.StreamInfo) {
 	}
 
 	if len(info.State.Deleted) > 0 { // backwards compat with older servers
-		fmt.Printf("     Deleted Messages: %d\n", len(info.State.Deleted))
+		fmt.Printf("     Deleted Messages: %s\n", humanize.Comma(int64(len(info.State.Deleted))))
 	} else if info.State.NumDeleted > 0 {
-		fmt.Printf("     Deleted Messages: %d\n", info.State.NumDeleted)
+		fmt.Printf("     Deleted Messages: %s\n", humanize.Comma(int64(info.State.NumDeleted)))
 	}
 
-	fmt.Printf("     Active Consumers: %d\n", info.State.Consumers)
+	fmt.Printf("     Active Consumers: %s\n", humanize.Comma(int64(info.State.Consumers)))
+
+	if info.State.NumSubjects > 0 { // available from 2.8
+		fmt.Printf("   Number of Subjects: %s\n", humanize.Comma(int64(info.State.NumSubjects)))
+	}
 
 	if len(info.Alternates) > 0 {
 		fmt.Printf("           Alternates: ")
@@ -1734,32 +1749,22 @@ func (c *streamCmd) showStreamInfo(info *api.StreamInfo) {
 	}
 }
 
-func (c *streamCmd) infoAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) stateAction(pc *fisk.ParseContext) error {
+	c.showStateOnly = true
+	return c.infoAction(pc)
+}
+
+func (c *streamCmd) infoAction(_ *fisk.ParseContext) error {
 	c.connectAndAskStream()
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not request Stream info")
+	fisk.FatalIfError(err, "could not request Stream info")
 	err = c.showStream(stream)
-	kingpin.FatalIfError(err, "could not show stream")
+	fisk.FatalIfError(err, "could not show stream")
 
 	fmt.Println()
 
 	return nil
-}
-
-func (c *streamCmd) splitCLISubjects() []string {
-	new := []string{}
-
-	re := regexp.MustCompile(`,|\t|\s`)
-	for _, s := range c.subjects {
-		if re.MatchString(s) {
-			new = append(new, splitString(s)...)
-		} else {
-			new = append(new, s)
-		}
-	}
-
-	return new
 }
 
 func (c *streamCmd) discardPolicyFromString() api.DiscardPolicy {
@@ -1769,7 +1774,7 @@ func (c *streamCmd) discardPolicyFromString() api.DiscardPolicy {
 	case "old":
 		return api.DiscardOld
 	default:
-		kingpin.Fatalf("invalid discard policy %s", c.discardPolicy)
+		fisk.Fatalf("invalid discard policy %s", c.discardPolicy)
 		return api.DiscardOld // unreachable
 	}
 }
@@ -1781,7 +1786,7 @@ func (c *streamCmd) storeTypeFromString(s string) api.StorageType {
 	case "memory", "m":
 		return api.MemoryStorage
 	default:
-		kingpin.Fatalf("invalid storage type %s", c.storage)
+		fisk.Fatalf("invalid storage type %s", c.storage)
 		return api.MemoryStorage // unreachable
 	}
 }
@@ -1795,17 +1800,17 @@ func (c *streamCmd) retentionPolicyFromString() api.RetentionPolicy {
 	case "work queue", "workq", "work":
 		return api.WorkQueuePolicy
 	default:
-		kingpin.Fatalf("invalid retention policy %s", c.retentionPolicyS)
+		fisk.Fatalf("invalid retention policy %s", c.retentionPolicyS)
 		return api.LimitsPolicy // unreachable
 	}
 }
 
-func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) api.StreamConfig {
+func (c *streamCmd) prepareConfig(pc *fisk.ParseContext, requireSize bool) api.StreamConfig {
 	var err error
 
 	if c.inputFile != "" {
 		cfg, err := c.loadConfigFile(c.inputFile)
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 
 		if c.stream != "" {
 			cfg.Name = c.stream
@@ -1826,7 +1831,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 		err = askOne(&survey.Input{
 			Message: "Stream Name",
 		}, &c.stream, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.mirror == "" && len(c.sources) == 0 {
@@ -1836,16 +1841,16 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 				Message: "Subjects",
 				Help:    "Streams consume messages from subjects, this is a space or comma separated list that can include wildcards. Settable using --subjects",
 			}, &subjects, survey.WithValidator(survey.Required))
-			kingpin.FatalIfError(err, "invalid input")
+			fisk.FatalIfError(err, "invalid input")
 
 			c.subjects = splitString(subjects)
 		}
 
-		c.subjects = c.splitCLISubjects()
+		c.subjects = splitCLISubjects(c.subjects)
 	}
 
 	if c.mirror != "" && len(c.subjects) > 0 {
-		kingpin.Fatalf("mirrors cannot listen for messages on subjects")
+		fisk.Fatalf("mirrors cannot listen for messages on subjects")
 	}
 
 	if c.storage == "" {
@@ -1854,17 +1859,17 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 			Options: []string{"file", "memory"},
 			Help:    "Streams are stored on the server, this can be one of many backends and all are usable in clustering mode. Settable using --storage",
 		}, &c.storage, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	storage := c.storeTypeFromString(c.storage)
 
 	if c.replicas == 0 {
 		c.replicas, err = askOneInt("Replication", "1", "When clustered, defines how many replicas of the data to store.  Settable using --replicas.")
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 	if c.replicas <= 0 {
-		kingpin.Fatalf("replicas should be >= 1")
+		fisk.Fatalf("replicas should be >= 1")
 	}
 
 	if c.retentionPolicyS == "" {
@@ -1874,7 +1879,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 			Help:    "Messages are retained either based on limits like size and age (Limits), as long as there are Consumers (Interest) or until any worker processed them (Work Queue)",
 			Default: "Limits",
 		}, &c.retentionPolicyS, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.discardPolicy == "" {
@@ -1884,12 +1889,12 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 			Help:    "Once the Stream reach it's limits of size or messages the New policy will prevent further messages from being added while Old will delete old messages.",
 			Default: "Old",
 		}, &c.discardPolicy, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.maxMsgLimit == 0 {
 		c.maxMsgLimit, err = askOneInt("Stream Messages Limit", "-1", "Defines the amount of messages to keep in the store for this Stream, when exceeded oldest messages are removed, -1 for unlimited. Settable using --max-msgs")
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 		if c.maxMsgLimit <= 0 {
 			c.maxMsgLimit = -1
 		}
@@ -1897,7 +1902,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 
 	if c.maxMsgPerSubjectLimit == 0 && len(c.subjects) > 0 && (len(c.subjects) > 0 || strings.Contains(c.subjects[0], "*") || strings.Contains(c.subjects[0], ">")) {
 		c.maxMsgPerSubjectLimit, err = askOneInt("Per Subject Messages Limit", "-1", "Defines the amount of messages to keep in the store for this Stream per unique subject, when exceeded oldest messages are removed, -1 for unlimited. Settable using --max-msgs-per-subject")
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 		if c.maxMsgPerSubjectLimit <= 0 {
 			c.maxMsgPerSubjectLimit = -1
 		}
@@ -1913,7 +1918,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 		}
 
 		c.maxBytesLimit, err = askOneBytes("Total Stream Size", defltSize, "Defines the combined size of all messages in a Stream, when exceeded messages are removed or new ones are rejected, -1 for unlimited. Settable using --max-bytes", reqd)
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.maxBytesLimit <= 0 {
@@ -1926,17 +1931,17 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 			Default: "-1",
 			Help:    "Defines the oldest messages that can be stored in the Stream, any messages older than this period will be removed, -1 for unlimited. Supports units (s)econds, (m)inutes, (h)ours, (y)ears, (M)onths, (d)ays. Settable using --max-age",
 		}, &c.maxAgeLimit)
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.maxAgeLimit != "-1" {
 		maxAge, err = parseDurationString(c.maxAgeLimit)
-		kingpin.FatalIfError(err, "invalid maximum age limit format")
+		fisk.FatalIfError(err, "invalid maximum age limit format")
 	}
 
 	if c.maxMsgSize == 0 {
 		c.maxMsgSize, err = askOneBytes("Max Message Size", "-1", "Defines the maximum size any single message may be to be accepted by the Stream. Settable using --max-msg-size", "")
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.maxMsgSize == 0 {
@@ -1954,33 +1959,29 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 			Default: defaultDW,
 			Help:    "Duplicate messages are identified by the Msg-Id headers and tracked within a window of this size. Supports units (s)econds, (m)inutes, (h)ours, (y)ears, (M)onths, (d)ays. Settable using --dupe-window.",
 		}, &c.dupeWindow)
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 	}
 
 	if c.dupeWindow != "" {
 		dupeWindow, err = parseDurationString(c.dupeWindow)
-		kingpin.FatalIfError(err, "invalid duplicate window format")
+		fisk.FatalIfError(err, "invalid duplicate window format")
 	}
 
-	allowRollup := pc.SelectedCommand.GetFlag("allow-rollup").Model().Value.(*OptionalBoolValue)
-	if !allowRollup.IsSetByUser() {
-		allow, err := askConfirmation("Allow message Roll-ups", false)
-		kingpin.FatalIfError(err, "invalid input")
-		allowRollup.SetBool(allow)
+	if !c.allowRollupSet {
+		c.allowRollup, err = askConfirmation("Allow message Roll-ups", false)
+		fisk.FatalIfError(err, "invalid input")
 	}
 
-	denyDelete := pc.SelectedCommand.GetFlag("deny-delete").Model().Value.(*OptionalBoolValue)
-	if !denyDelete.IsSetByUser() {
+	if !c.denyDeleteSet {
 		allow, err := askConfirmation("Allow message deletion", true)
-		kingpin.FatalIfError(err, "invalid input")
-		denyDelete.SetBool(!allow)
+		fisk.FatalIfError(err, "invalid input")
+		c.denyDelete = !allow
 	}
 
-	denyPurge := pc.SelectedCommand.GetFlag("deny-purge").Model().Value.(*OptionalBoolValue)
-	if !denyPurge.IsSetByUser() {
+	if !c.denyPurgeSet {
 		allow, err := askConfirmation("Allow purging subjects or the entire stream", true)
-		kingpin.FatalIfError(err, "invalid input")
-		denyPurge.SetBool(!allow)
+		fisk.FatalIfError(err, "invalid input")
+		c.denyPurge = !allow
 	}
 
 	cfg := api.StreamConfig{
@@ -1999,9 +2000,12 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 		Discard:       c.discardPolicyFromString(),
 		MaxConsumers:  c.maxConsumers,
 		Replicas:      int(c.replicas),
-		RollupAllowed: allowRollup.Value(),
-		DenyPurge:     denyPurge.Value(),
-		DenyDelete:    denyDelete.Value(),
+		RollupAllowed: c.allowRollup,
+		DenyPurge:     c.denyPurge,
+		DenyDelete:    c.denyDelete,
+		AllowDirect:   c.allowDirect,
+		MirrorDirect:  c.allowMirrorDirectSet,
+		DiscardNewPer: c.discardPerSubj,
 	}
 
 	if c.placementCluster != "" || len(c.placementTags) > 0 {
@@ -2014,7 +2018,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 	if c.mirror != "" {
 		if isJsonString(c.mirror) {
 			cfg.Mirror, err = c.parseStreamSource(c.mirror)
-			kingpin.FatalIfError(err, "invalid mirror")
+			fisk.FatalIfError(err, "invalid mirror")
 		} else {
 			cfg.Mirror = c.askMirror()
 		}
@@ -2023,7 +2027,7 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 	for _, source := range c.sources {
 		if isJsonString(source) {
 			ss, err := c.parseStreamSource(source)
-			kingpin.FatalIfError(err, "invalid source")
+			fisk.FatalIfError(err, "invalid source")
 			cfg.Sources = append(cfg.Sources, ss)
 		} else {
 			ss := c.askSource(source, fmt.Sprintf("%s Source", source))
@@ -2032,9 +2036,10 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 	}
 
 	if c.repubSource != "" && c.repubDest != "" {
-		cfg.RePublish = &api.SubjectMapping{
+		cfg.RePublish = &api.RePublish{
 			Source:      c.repubSource,
 			Destination: c.repubDest,
+			HeadersOnly: c.repubHeadersOnly,
 		}
 	}
 
@@ -2044,10 +2049,10 @@ func (c *streamCmd) prepareConfig(pc *kingpin.ParseContext, requireSize bool) ap
 func (c *streamCmd) askMirror() *api.StreamSource {
 	mirror := &api.StreamSource{Name: c.mirror}
 	ok, err := askConfirmation("Adjust mirror start", false)
-	kingpin.FatalIfError(err, "Could not request mirror details")
+	fisk.FatalIfError(err, "Could not request mirror details")
 	if ok {
 		a, err := askOneInt("Mirror Start Sequence", "0", "Start mirroring at a specific sequence")
-		kingpin.FatalIfError(err, "Invalid sequence")
+		fisk.FatalIfError(err, "Invalid sequence")
 		mirror.OptStartSeq = uint64(a)
 
 		if mirror.OptStartSeq == 0 {
@@ -2056,17 +2061,23 @@ func (c *streamCmd) askMirror() *api.StreamSource {
 				Message: "Mirror Start Time (YYYY:MM:DD HH:MM:SS)",
 				Help:    "Start replicating as a specific time stamp in UTC time",
 			}, &ts)
-			kingpin.FatalIfError(err, "could not request start time")
+			fisk.FatalIfError(err, "could not request start time")
 			if ts != "" {
 				t, err := time.Parse("2006:01:02 15:04:05", ts)
-				kingpin.FatalIfError(err, "invalid time format")
+				fisk.FatalIfError(err, "invalid time format")
 				mirror.OptStartTime = &t
 			}
 		}
+
+		err = askOne(&survey.Input{
+			Message: "Filter mirror by subject",
+			Help:    "Only replicate data matching this subject",
+		}, &mirror.FilterSubject)
+		fisk.FatalIfError(err, "could not request filter")
 	}
 
 	ok, err = askConfirmation("Import mirror from a different JetStream domain", false)
-	kingpin.FatalIfError(err, "Could not request mirror details")
+	fisk.FatalIfError(err, "Could not request mirror details")
 	if ok {
 		mirror.External = &api.ExternalStream{}
 		domainName := ""
@@ -2074,19 +2085,19 @@ func (c *streamCmd) askMirror() *api.StreamSource {
 			Message: "Foreign JetStream domain name",
 			Help:    "The domain name from where to import the JetStream API",
 		}, &domainName, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "Could not request mirror details")
+		fisk.FatalIfError(err, "Could not request mirror details")
 		mirror.External.ApiPrefix = fmt.Sprintf("$JS.%s.API", domainName)
 
 		err = askOne(&survey.Input{
 			Message: "Delivery prefix",
 			Help:    "Optional prefix of the delivery subject",
 		}, &mirror.External.DeliverPrefix)
-		kingpin.FatalIfError(err, "Could not request mirror details")
+		fisk.FatalIfError(err, "Could not request mirror details")
 		return mirror
 	}
 
 	ok, err = askConfirmation("Import mirror from a different account", false)
-	kingpin.FatalIfError(err, "Could not request mirror details")
+	fisk.FatalIfError(err, "Could not request mirror details")
 	if !ok {
 		return mirror
 	}
@@ -2096,13 +2107,13 @@ func (c *streamCmd) askMirror() *api.StreamSource {
 		Message: "Foreign account API prefix",
 		Help:    "The prefix where the foreign account JetStream API has been imported",
 	}, &mirror.External.ApiPrefix, survey.WithValidator(survey.Required))
-	kingpin.FatalIfError(err, "Could not request mirror details")
+	fisk.FatalIfError(err, "Could not request mirror details")
 
 	err = askOne(&survey.Input{
 		Message: "Foreign account delivery prefix",
 		Help:    "The prefix where the foreign account JetStream delivery subjects has been imported",
 	}, &mirror.External.DeliverPrefix, survey.WithValidator(survey.Required))
-	kingpin.FatalIfError(err, "Could not request mirror details")
+	fisk.FatalIfError(err, "Could not request mirror details")
 
 	return mirror
 }
@@ -2111,10 +2122,10 @@ func (c *streamCmd) askSource(name string, prefix string) *api.StreamSource {
 	cfg := &api.StreamSource{Name: name}
 
 	ok, err := askConfirmation(fmt.Sprintf("Adjust source %q start", name), false)
-	kingpin.FatalIfError(err, "Could not request source details")
+	fisk.FatalIfError(err, "Could not request source details")
 	if ok {
 		a, err := askOneInt(fmt.Sprintf("%s Start Sequence", prefix), "0", "Start mirroring at a specific sequence")
-		kingpin.FatalIfError(err, "Invalid sequence")
+		fisk.FatalIfError(err, "Invalid sequence")
 		cfg.OptStartSeq = uint64(a)
 
 		ts := ""
@@ -2122,22 +2133,22 @@ func (c *streamCmd) askSource(name string, prefix string) *api.StreamSource {
 			Message: fmt.Sprintf("%s UTC Time Stamp (YYYY:MM:DD HH:MM:SS)", prefix),
 			Help:    "Start replicating as a specific time stamp",
 		}, &ts)
-		kingpin.FatalIfError(err, "could not request start time")
+		fisk.FatalIfError(err, "could not request start time")
 		if ts != "" {
 			t, err := time.Parse("2006:01:02 15:04:05", ts)
-			kingpin.FatalIfError(err, "invalid time format")
+			fisk.FatalIfError(err, "invalid time format")
 			cfg.OptStartTime = &t
 		}
-
-		err = askOne(&survey.Input{
-			Message: fmt.Sprintf("%s Filter source by subject", prefix),
-			Help:    "Only replicate data matching this subject",
-		}, &cfg.FilterSubject)
-		kingpin.FatalIfError(err, "could not request filter")
 	}
 
+	err = askOne(&survey.Input{
+		Message: fmt.Sprintf("%s Filter source by subject", prefix),
+		Help:    "Only replicate data matching this subject",
+	}, &cfg.FilterSubject)
+	fisk.FatalIfError(err, "could not request filter")
+
 	ok, err = askConfirmation(fmt.Sprintf("Import %q from a different JetStream domain", name), false)
-	kingpin.FatalIfError(err, "Could not request source details")
+	fisk.FatalIfError(err, "Could not request source details")
 	if ok {
 		cfg.External = &api.ExternalStream{}
 		domainName := ""
@@ -2145,19 +2156,19 @@ func (c *streamCmd) askSource(name string, prefix string) *api.StreamSource {
 			Message: fmt.Sprintf("%s foreign JetStream domain name", prefix),
 			Help:    "The domain name from where to import the JetStream API",
 		}, &domainName, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "Could not request source details")
+		fisk.FatalIfError(err, "Could not request source details")
 		cfg.External.ApiPrefix = fmt.Sprintf("$JS.%s.API", domainName)
 
 		err = askOne(&survey.Input{
 			Message: fmt.Sprintf("%s foreign JetStream domain delivery prefix", prefix),
 			Help:    "Optional prefix of the delivery subject",
 		}, &cfg.External.DeliverPrefix)
-		kingpin.FatalIfError(err, "Could not request source details")
+		fisk.FatalIfError(err, "Could not request source details")
 		return cfg
 	}
 
 	ok, err = askConfirmation(fmt.Sprintf("Import %q from a different account", name), false)
-	kingpin.FatalIfError(err, "Could not request source details")
+	fisk.FatalIfError(err, "Could not request source details")
 	if !ok {
 		return cfg
 	}
@@ -2167,13 +2178,13 @@ func (c *streamCmd) askSource(name string, prefix string) *api.StreamSource {
 		Message: fmt.Sprintf("%s foreign account API prefix", prefix),
 		Help:    "The prefix where the foreign account JetStream API has been imported",
 	}, &cfg.External.ApiPrefix, survey.WithValidator(survey.Required))
-	kingpin.FatalIfError(err, "Could not request source details")
+	fisk.FatalIfError(err, "Could not request source details")
 
 	err = askOne(&survey.Input{
 		Message: fmt.Sprintf("%s foreign account delivery prefix", prefix),
 		Help:    "The prefix where the foreign account JetStream delivery subjects has been imported",
 	}, &cfg.External.DeliverPrefix, survey.WithValidator(survey.Required))
-	kingpin.FatalIfError(err, "Could not request source details")
+	fisk.FatalIfError(err, "Could not request source details")
 
 	return cfg
 }
@@ -2219,9 +2230,9 @@ func (c *streamCmd) validateCfg(cfg *api.StreamConfig) (bool, []byte, []string, 
 	return valid, j, errs, nil
 }
 
-func (c *streamCmd) addAction(pc *kingpin.ParseContext) (err error) {
+func (c *streamCmd) addAction(pc *fisk.ParseContext) (err error) {
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "could not create Stream")
+	fisk.FatalIfError(err, "could not create Stream")
 
 	requireSize, _ := mgr.IsStreamMaxBytesRequired()
 
@@ -2237,7 +2248,7 @@ func (c *streamCmd) addAction(pc *kingpin.ParseContext) (err error) {
 		fmt.Println(string(j))
 		fmt.Println()
 		if !valid {
-			kingpin.Fatalf("Validation Failed: %s", strings.Join(errs, "\n\t"))
+			fisk.Fatalf("Validation Failed: %s", strings.Join(errs, "\n\t"))
 		}
 
 		fmt.Printf("Configuration is a valid Stream matching %s\n", cfg.SchemaType())
@@ -2245,17 +2256,17 @@ func (c *streamCmd) addAction(pc *kingpin.ParseContext) (err error) {
 
 	case c.outFile != "":
 		valid, j, errs, err := c.validateCfg(&cfg)
-		kingpin.FatalIfError(err, "Could not validate configuration")
+		fisk.FatalIfError(err, "Could not validate configuration")
 
 		if !valid {
-			kingpin.Fatalf("Validation Failed: %s", strings.Join(errs, "\n\t"))
+			fisk.Fatalf("Validation Failed: %s", strings.Join(errs, "\n\t"))
 		}
 
-		return ioutil.WriteFile(c.outFile, j, 0644)
+		return os.WriteFile(c.outFile, j, 0644)
 	}
 
 	str, err := mgr.NewStreamFromDefault(c.stream, cfg)
-	kingpin.FatalIfError(err, "could not create Stream")
+	fisk.FatalIfError(err, "could not create Stream")
 
 	fmt.Printf("Stream %s was created\n\n", c.stream)
 
@@ -2264,33 +2275,49 @@ func (c *streamCmd) addAction(pc *kingpin.ParseContext) (err error) {
 	return nil
 }
 
-func (c *streamCmd) rmAction(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) rmAction(_ *fisk.ParseContext) (err error) {
+	if c.force {
+		if c.stream == "" {
+			return fmt.Errorf("--force requires a stream name")
+		}
+
+		c.nc, c.mgr, err = prepareHelper("", natsOpts()...)
+		fisk.FatalIfError(err, "setup failed")
+
+		err = c.mgr.DeleteStream(c.stream)
+		if err != nil {
+			if err == context.DeadlineExceeded {
+				fmt.Println("Delete failed due to timeout, the stream might not exist or be in an unmanageable state")
+			}
+		}
+
+		return err
+	}
+
 	c.connectAndAskStream()
 
-	if !c.force {
-		ok, err := askConfirmation(fmt.Sprintf("Really delete Stream %s", c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+	ok, err := askConfirmation(fmt.Sprintf("Really delete Stream %s", c.stream), false)
+	fisk.FatalIfError(err, "could not obtain confirmation")
 
-		if !ok {
-			return nil
-		}
+	if !ok {
+		return nil
 	}
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not remove Stream")
+	fisk.FatalIfError(err, "could not remove Stream")
 
 	err = stream.Delete()
-	kingpin.FatalIfError(err, "could not remove Stream")
+	fisk.FatalIfError(err, "could not remove Stream")
 
 	return nil
 }
 
-func (c *streamCmd) purgeAction(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) purgeAction(_ *fisk.ParseContext) (err error) {
 	c.connectAndAskStream()
 
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really purge Stream %s", c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -2298,7 +2325,7 @@ func (c *streamCmd) purgeAction(_ *kingpin.ParseContext) (err error) {
 	}
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not purge Stream")
+	fisk.FatalIfError(err, "could not purge Stream")
 
 	var req *api.JSApiStreamPurgeRequest
 	if c.purgeKeep > 0 || c.purgeSubject != "" || c.purgeSequence > 0 {
@@ -2314,7 +2341,7 @@ func (c *streamCmd) purgeAction(_ *kingpin.ParseContext) (err error) {
 	}
 
 	err = stream.Purge(req)
-	kingpin.FatalIfError(err, "could not purge Stream")
+	fisk.FatalIfError(err, "could not purge Stream")
 
 	stream.Reset()
 
@@ -2323,15 +2350,21 @@ func (c *streamCmd) purgeAction(_ *kingpin.ParseContext) (err error) {
 	return nil
 }
 
-func (c *streamCmd) lsAction(_ *kingpin.ParseContext) error {
+func (c *streamCmd) lsAction(_ *fisk.ParseContext) error {
 	_, mgr, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	var streams []*jsm.Stream
 	var names []string
 
 	skipped := false
-	err = mgr.EachStream(func(s *jsm.Stream) {
+
+	var filter *jsm.StreamNamesFilter
+	if c.filterSubject != "" {
+		filter = &jsm.StreamNamesFilter{Subject: c.filterSubject}
+	}
+
+	err = mgr.EachStream(filter, func(s *jsm.Stream) {
 		if !c.showAll && s.IsInternal() {
 			skipped = true
 			return
@@ -2346,7 +2379,7 @@ func (c *streamCmd) lsAction(_ *kingpin.ParseContext) error {
 
 	if c.json {
 		err = printJSON(names)
-		kingpin.FatalIfError(err, "could not display Streams")
+		fisk.FatalIfError(err, "could not display Streams")
 		return nil
 	}
 
@@ -2401,13 +2434,13 @@ func (c *streamCmd) renderStreamsAsTable(streams []*jsm.Stream) (string, error) 
 	table.AddHeaders("Name", "Description", "Created", "Messages", "Size", "Last Message")
 	for _, s := range streams {
 		nfo, _ := s.LatestInformation()
-		table.AddRow(s.Name(), s.Description(), nfo.Created.Format("2006-01-02 15:01:05"), humanize.Comma(int64(nfo.State.Msgs)), humanize.IBytes(nfo.State.Bytes), humanizeDuration(time.Since(nfo.State.LastTime)))
+		table.AddRow(s.Name(), s.Description(), nfo.Created.Local().Format("2006-01-02 15:04:05"), humanize.Comma(int64(nfo.State.Msgs)), humanize.IBytes(nfo.State.Bytes), humanizeDuration(time.Since(nfo.State.LastTime)))
 	}
 
 	return table.Render(), nil
 }
 
-func (c *streamCmd) rmMsgAction(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) rmMsgAction(_ *fisk.ParseContext) (err error) {
 	c.connectAndAskStream()
 
 	if c.msgID == -1 {
@@ -2415,10 +2448,10 @@ func (c *streamCmd) rmMsgAction(_ *kingpin.ParseContext) (err error) {
 		err = askOne(&survey.Input{
 			Message: "Message Sequence to remove",
 		}, &id, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 
 		idint, err := strconv.Atoi(id)
-		kingpin.FatalIfError(err, "invalid number")
+		fisk.FatalIfError(err, "invalid number")
 
 		if idint <= 0 {
 			return fmt.Errorf("positive message ID required")
@@ -2427,11 +2460,11 @@ func (c *streamCmd) rmMsgAction(_ *kingpin.ParseContext) (err error) {
 	}
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not load Stream %s", c.stream)
+	fisk.FatalIfError(err, "could not load Stream %s", c.stream)
 
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really remove message %d from Stream %s", c.msgID, c.stream), false)
-		kingpin.FatalIfError(err, "could not obtain confirmation")
+		fisk.FatalIfError(err, "could not obtain confirmation")
 
 		if !ok {
 			return nil
@@ -2441,7 +2474,7 @@ func (c *streamCmd) rmMsgAction(_ *kingpin.ParseContext) (err error) {
 	return stream.DeleteMessage(uint64(c.msgID))
 }
 
-func (c *streamCmd) getAction(_ *kingpin.ParseContext) (err error) {
+func (c *streamCmd) getAction(_ *fisk.ParseContext) (err error) {
 	c.connectAndAskStream()
 
 	if c.msgID == -1 && c.filterSubject == "" {
@@ -2450,10 +2483,10 @@ func (c *streamCmd) getAction(_ *kingpin.ParseContext) (err error) {
 			Message: "Message Sequence to retrieve",
 			Default: "-1",
 		}, &id, survey.WithValidator(survey.Required))
-		kingpin.FatalIfError(err, "invalid input")
+		fisk.FatalIfError(err, "invalid input")
 
 		idint, err := strconv.Atoi(id)
-		kingpin.FatalIfError(err, "invalid number")
+		fisk.FatalIfError(err, "invalid number")
 
 		c.msgID = int64(idint)
 
@@ -2461,12 +2494,12 @@ func (c *streamCmd) getAction(_ *kingpin.ParseContext) (err error) {
 			err = askOne(&survey.Input{
 				Message: "Subject to retrieve last message for",
 			}, &c.filterSubject)
-			kingpin.FatalIfError(err, "invalid subject")
+			fisk.FatalIfError(err, "invalid subject")
 		}
 	}
 
 	stream, err := c.loadStream(c.stream)
-	kingpin.FatalIfError(err, "could not load Stream %s", c.stream)
+	fisk.FatalIfError(err, "could not load Stream %s", c.stream)
 
 	var item *api.StoredMsg
 	if c.msgID > -1 {
@@ -2476,7 +2509,7 @@ func (c *streamCmd) getAction(_ *kingpin.ParseContext) (err error) {
 	} else {
 		return fmt.Errorf("no ID or subject specified")
 	}
-	kingpin.FatalIfError(err, "could not retrieve %s#%d", c.stream, c.msgID)
+	fisk.FatalIfError(err, "could not retrieve %s#%d", c.stream, c.msgID)
 
 	if c.json {
 		printJSON(item)
@@ -2503,12 +2536,23 @@ func (c *streamCmd) getAction(_ *kingpin.ParseContext) (err error) {
 	return nil
 }
 
-func (c *streamCmd) connectAndAskStream() {
+func (c *streamCmd) connectAndAskStream() bool {
 	var err error
 
+	shouldAsk := c.stream == ""
 	c.nc, c.mgr, err = prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	c.stream, c.selectedStream, err = selectStream(c.mgr, c.stream, c.force, c.showAll)
-	kingpin.FatalIfError(err, "could not pick a Stream to operate on")
+	fisk.FatalIfError(err, "could not pick a Stream to operate on")
+
+	return shouldAsk
+}
+
+func (c *streamCmd) boolReverse(v bool) bool {
+	if c.reportSortReverse {
+		return !v
+	}
+
+	return v
 }

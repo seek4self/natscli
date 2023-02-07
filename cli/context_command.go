@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,8 +20,8 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/choria-io/fisk"
 	"github.com/fatih/color"
-	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/nats-io/jsm.go/natscontext"
 	"github.com/nats-io/nats.go"
@@ -43,60 +43,41 @@ func configureCtxCommand(app commandHost) {
 	c := ctxCommand{}
 
 	context := app.Command("context", "Manage nats configuration contexts").Alias("ctx")
-
+	addCheat("contexts", context)
 	save := context.Command("save", "Update or create a context").Alias("add").Alias("create").Action(c.createCommand)
 	save.Arg("name", "The context name to act on").Required().StringVar(&c.name)
 	save.Flag("description", "Set a friendly description for this context").StringVar(&c.description)
-	save.Flag("select", "Select the saved context as the default one").BoolVar(&c.activate)
+	save.Flag("select", "Select the saved context as the default one").UnNegatableBoolVar(&c.activate)
 	save.Flag("nsc", "URL to a nsc user, eg. nsc://<operator>/<account>/<user>").StringVar(&c.nsc)
 
 	dupe := context.Command("copy", "Copies an existing context").Alias("cp").Action(c.copyCommand)
 	dupe.Arg("source", "The name of the context to copy from").Required().StringVar(&c.source)
 	dupe.Arg("name", "The name of the context to create").Required().StringVar(&c.name)
 	dupe.Flag("description", "Set a friendly description for this context").StringVar(&c.description)
-	dupe.Flag("select", "Select the saved context as the default one").BoolVar(&c.activate)
+	dupe.Flag("select", "Select the saved context as the default one").UnNegatableBoolVar(&c.activate)
 	dupe.Flag("nsc", "URL to a nsc user, eg. nsc://<operator>/<account>/<user>").StringVar(&c.nsc)
 
 	edit := context.Command("edit", "Edit a context in your EDITOR").Alias("vi").Action(c.editCommand)
 	edit.Arg("name", "The context name to edit").Required().StringVar(&c.name)
 
 	ls := context.Command("ls", "List known contexts").Alias("list").Alias("l").Action(c.listCommand)
-	ls.Flag("completion", "Format the list for use by shell completion").Hidden().BoolVar(&c.completionFormat)
+	ls.Flag("completion", "Format the list for use by shell completion").Hidden().UnNegatableBoolVar(&c.completionFormat)
 
 	rm := context.Command("rm", "Remove a context").Alias("remove").Action(c.removeCommand)
 	rm.Arg("name", "The context name to remove").Required().StringVar(&c.name)
-	rm.Flag("force", "Force remove without prompting").Short('f').BoolVar(&c.force)
+	rm.Flag("force", "Force remove without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
 	pick := context.Command("select", "Select the default context").Alias("switch").Alias("set").Action(c.selectCommand)
 	pick.Arg("name", "The context name to select").StringVar(&c.name)
 
 	info := context.Command("info", "Display information on the current or named context").Alias("show").Action(c.showCommand)
 	info.Arg("name", "The context name to show").StringVar(&c.name)
-	info.Flag("json", "Show the context in JSON format").Short('j').BoolVar(&c.json)
-	info.Flag("connect", "Attempts to connect to NATS using the context while validating").BoolVar(&c.activate)
+	info.Flag("json", "Show the context in JSON format").Short('j').UnNegatableBoolVar(&c.json)
+	info.Flag("connect", "Attempts to connect to NATS using the context while validating").UnNegatableBoolVar(&c.activate)
 
 	validate := context.Command("validate", "Validate one or all contexts").Action(c.validateCommand)
 	validate.Arg("name", "Validate a specific context, validates all when not supplied").StringVar(&c.name)
-	validate.Flag("connect", "Attempts to connect to NATS using the context while validating").BoolVar(&c.activate)
-
-	cheats["contexts"] = `# Create or update
-nats context add development --server nats.dev.example.net:4222 [other standard connection properties]
-nats context add ngs --description "NGS Connection in Orders Account" --nsc nsc://acme/orders/new
-nats context edit development [standard connection properties]
-
-# View contexts
-nats context ls
-nats context info development --json
-
-# Validate all connections are valid and that connections can be established
-nats context validate --connect
-
-# Select a new default context
-nats context select
-
-# Connecting using a context
-nats pub --context development subject body
-`
+	validate.Flag("connect", "Attempts to connect to NATS using the context while validating").UnNegatableBoolVar(&c.activate)
 }
 
 func init() {
@@ -117,7 +98,7 @@ func (c *ctxCommand) overrideVars() []string {
 
 	return list
 }
-func (c *ctxCommand) validateCommand(pc *kingpin.ParseContext) error {
+func (c *ctxCommand) validateCommand(pc *fisk.ParseContext) error {
 	var contexts []string
 	if c.name == "" {
 		contexts = natscontext.KnownContexts()
@@ -142,7 +123,7 @@ func (c *ctxCommand) validateCommand(pc *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *ctxCommand) copyCommand(pc *kingpin.ParseContext) error {
+func (c *ctxCommand) copyCommand(pc *fisk.ParseContext) error {
 	if !natscontext.IsKnown(c.source) {
 		return fmt.Errorf("unknown context %q", c.source)
 	}
@@ -156,7 +137,7 @@ func (c *ctxCommand) copyCommand(pc *kingpin.ParseContext) error {
 	return c.createCommand(pc)
 }
 
-func (c *ctxCommand) editCommand(pc *kingpin.ParseContext) error {
+func (c *ctxCommand) editCommand(pc *fisk.ParseContext) error {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		return fmt.Errorf("set EDITOR environment variable to your chosen editor")
@@ -228,7 +209,7 @@ func (c *ctxCommand) renderListTable(current string, known []*natscontext.Contex
 	fmt.Println(table.Render())
 
 }
-func (c *ctxCommand) listCommand(_ *kingpin.ParseContext) error {
+func (c *ctxCommand) listCommand(_ *fisk.ParseContext) error {
 	names := natscontext.KnownContexts()
 	current := natscontext.SelectedContext()
 	var contexts []*natscontext.Context
@@ -254,7 +235,7 @@ func (c *ctxCommand) listCommand(_ *kingpin.ParseContext) error {
 	return nil
 }
 
-func (c *ctxCommand) showCommand(_ *kingpin.ParseContext) error {
+func (c *ctxCommand) showCommand(_ *fisk.ParseContext) error {
 	if c.name == "" {
 		c.name = natscontext.SelectedContext()
 	}
@@ -339,7 +320,7 @@ func (c *ctxCommand) showCommand(_ *kingpin.ParseContext) error {
 
 	return nil
 }
-func (c *ctxCommand) createCommand(pc *kingpin.ParseContext) error {
+func (c *ctxCommand) createCommand(pc *fisk.ParseContext) error {
 	lname := ""
 	load := false
 
@@ -367,6 +348,7 @@ func (c *ctxCommand) createCommand(pc *kingpin.ParseContext) error {
 		natscontext.WithJSAPIPrefix(opts.JsApiPrefix),
 		natscontext.WithJSEventPrefix(opts.JsEventPrefix),
 		natscontext.WithJSDomain(opts.JsDomain),
+		natscontext.WithInboxPrefix(opts.InboxPrefix),
 	)
 	if err != nil {
 		return err
@@ -384,7 +366,7 @@ func (c *ctxCommand) createCommand(pc *kingpin.ParseContext) error {
 	return c.showCommand(pc)
 }
 
-func (c *ctxCommand) removeCommand(_ *kingpin.ParseContext) error {
+func (c *ctxCommand) removeCommand(_ *fisk.ParseContext) error {
 	if !c.force {
 		ok, err := askConfirmation(fmt.Sprintf("Really delete context %q", c.name), false)
 		if err != nil {
@@ -399,7 +381,7 @@ func (c *ctxCommand) removeCommand(_ *kingpin.ParseContext) error {
 	return natscontext.DeleteContext(c.name)
 }
 
-func (c *ctxCommand) selectCommand(pc *kingpin.ParseContext) error {
+func (c *ctxCommand) selectCommand(pc *fisk.ParseContext) error {
 	known := natscontext.KnownContexts()
 
 	if len(known) == 0 {
@@ -429,7 +411,7 @@ func (c *ctxCommand) selectCommand(pc *kingpin.ParseContext) error {
 	return c.showCommand(pc)
 }
 
-func (c *ctxCommand) showIfNotEmpty(format string, val string, arg ...interface{}) {
+func (c *ctxCommand) showIfNotEmpty(format string, val string, arg ...any) {
 	if val == "" {
 		return
 	}
@@ -439,5 +421,5 @@ func (c *ctxCommand) showIfNotEmpty(format string, val string, arg ...interface{
 		return
 	}
 
-	fmt.Printf(format, append([]interface{}{interface{}(val)}, arg...)...)
+	fmt.Printf(format, append([]any{any(val)}, arg...)...)
 }

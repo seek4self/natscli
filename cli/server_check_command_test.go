@@ -1,8 +1,21 @@
+// Copyright 2020-2022 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cli
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +44,7 @@ func assertHasPDItem(t *testing.T, check *result, items ...string) {
 func withJetStream(t *testing.T, cb func(srv *server.Server, nc *nats.Conn, mgr *jsm.Manager)) {
 	t.Helper()
 
-	dir, err := ioutil.TempDir("", "")
+	dir, err := os.MkdirTemp("", "")
 	checkErr(t, err, "could not create temporary js store: %v", err)
 
 	srv, err := server.NewServer(&server.Options{
@@ -317,7 +330,7 @@ func TestCheckMirror(t *testing.T) {
 	})
 
 	t.Run("failed mirror", func(t *testing.T) {
-		info.Mirror = &api.StreamSourceInfo{"M", nil, 100, time.Hour, nil}
+		info.Mirror = &api.StreamSourceInfo{Name: "M", Lag: 100, Active: time.Hour}
 		check := &result{}
 		err := cmd.checkMirror(check, info)
 		checkErr(t, err, "unexpected error")
@@ -327,7 +340,7 @@ func TestCheckMirror(t *testing.T) {
 	})
 
 	t.Run("ok mirror", func(t *testing.T) {
-		info.Mirror = &api.StreamSourceInfo{"M", nil, 1, 10 * time.Millisecond, nil}
+		info.Mirror = &api.StreamSourceInfo{Name: "M", Lag: 1, Active: 10 * time.Millisecond}
 		check := &result{}
 		assertNoError(t, cmd.checkMirror(check, info))
 		assertHasPDItem(t, check, "lag=1;;50 active=0.0100s;;1.0000")
@@ -354,7 +367,7 @@ func TestCheckSources(t *testing.T) {
 	t.Run("lagged source", func(t *testing.T) {
 		info = &api.StreamInfo{
 			Sources: []*api.StreamSourceInfo{
-				{"s1", nil, 1000, time.Millisecond, nil},
+				{Name: "s1", Lag: 1000, Active: time.Millisecond},
 			},
 		}
 
@@ -367,7 +380,7 @@ func TestCheckSources(t *testing.T) {
 	t.Run("inactive source", func(t *testing.T) {
 		info = &api.StreamInfo{
 			Sources: []*api.StreamSourceInfo{
-				{"s1", nil, 0, time.Hour, nil},
+				{Name: "s1", Active: time.Hour},
 			},
 		}
 
@@ -380,7 +393,7 @@ func TestCheckSources(t *testing.T) {
 	t.Run("not enough sources", func(t *testing.T) {
 		info = &api.StreamInfo{
 			Sources: []*api.StreamSourceInfo{
-				{"s1", nil, 0, time.Millisecond, nil},
+				{Name: "s1", Active: time.Millisecond},
 			},
 		}
 
@@ -395,8 +408,8 @@ func TestCheckSources(t *testing.T) {
 	t.Run("too many sources", func(t *testing.T) {
 		info = &api.StreamInfo{
 			Sources: []*api.StreamSourceInfo{
-				{"s1", nil, 0, time.Millisecond, nil},
-				{"s2", nil, 0, time.Millisecond, nil},
+				{Name: "s1", Active: time.Millisecond},
+				{Name: "s2", Active: time.Millisecond},
 			},
 		}
 

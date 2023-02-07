@@ -1,4 +1,4 @@
-// Copyright 2019 The NATS Authors
+// Copyright 2019-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,7 +17,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -40,7 +39,7 @@ func init() {
 	cli.SkipContexts = true
 }
 
-func checkErr(t *testing.T, err error, format string, a ...interface{}) {
+func checkErr(t *testing.T, err error, format string, a ...any) {
 	t.Helper()
 	if err == nil {
 		return
@@ -87,7 +86,7 @@ func prepareHelper(servers string) (*nats.Conn, *jsm.Manager, error) {
 func setupJStreamTest(t *testing.T) (srv *server.Server, nc *nats.Conn, mgr *jsm.Manager) {
 	t.Helper()
 
-	dir, err := ioutil.TempDir("", "")
+	dir, err := os.MkdirTemp("", "")
 	checkErr(t, err, "could not create temporary js store: %v", err)
 
 	srv, err = server.NewServer(&server.Options{
@@ -206,7 +205,7 @@ func TestCLIStreamCreate(t *testing.T) {
 	srv, _, mgr := setupJStreamTest(t)
 	defer srv.Shutdown()
 
-	runNatsCli(t, fmt.Sprintf("--server='%s' str create mem1 --subjects 'js.mem.>,js.other' --storage m --max-msgs-per-subject=10 --max-msgs=-1 --max-age=-1 --max-bytes=-1 --ack --retention limits --max-msg-size=1024 --discard new --dupe-window 1h --replicas 1 --description 'test suite' --allow-rollup --deny-delete --no-deny-purge", srv.ClientURL()))
+	runNatsCli(t, fmt.Sprintf("--server='%s' str create mem1 --subjects 'js.mem.>,js.other' --storage m --max-msgs-per-subject=10 --max-msgs=-1 --max-age=-1 --max-bytes=-1 --ack --retention limits --max-msg-size=1024 --discard new --dupe-window 1h --replicas 1 --description 'test suite' --allow-rollup --deny-delete --no-deny-purge --allow-direct", srv.ClientURL()))
 	streamShouldExist(t, mgr, "mem1")
 	info := streamInfo(t, mgr, "mem1")
 
@@ -256,6 +255,10 @@ func TestCLIStreamCreate(t *testing.T) {
 
 	if !info.Config.DenyDelete {
 		t.Fatalf("expected delete to be denied")
+	}
+
+	if !info.Config.AllowDirect {
+		t.Fatalf("expected direct access to be enabled")
 	}
 
 	runNatsCli(t, fmt.Sprintf("--server='%s' str create ORDERS --config testdata/ORDERS_config.json", srv.ClientURL()))
@@ -445,7 +448,7 @@ func TestCLIStreamBackupAndRestore(t *testing.T) {
 		nc.Publish("js.file.1", []byte(RandomString(5480)))
 	}
 
-	td, err := ioutil.TempDir("", "")
+	td, err := os.MkdirTemp("", "")
 	checkErr(t, err, "temp dir failed")
 	os.RemoveAll(td)
 
@@ -647,7 +650,7 @@ func TestCLIStreamEdit(t *testing.T) {
 	checkErr(t, err, "could not create stream: %v", err)
 	streamShouldExist(t, mgr, "mem1")
 
-	runNatsCli(t, fmt.Sprintf("--server='%s' str edit mem1 --subjects other -f --description 'test suite'", srv.ClientURL()))
+	runNatsCli(t, fmt.Sprintf("--server='%s' str edit mem1 --subjects other -f --description 'test suite' --allow-direct", srv.ClientURL()))
 
 	err = mem1.Reset()
 	checkErr(t, err, "could not reset stream: %v", err)
@@ -664,6 +667,10 @@ func TestCLIStreamEdit(t *testing.T) {
 		t.Fatalf("expected [other] got %v", mem1.Subjects())
 	}
 
+	if !mem1.DirectAllowed() {
+		t.Fatalf("expected direct access to be enabled")
+	}
+
 	runNatsCli(t, fmt.Sprintf("--server='%s' str edit mem1 -f --config testdata/mem1_config.json", srv.ClientURL()))
 
 	err = mem1.Reset()
@@ -675,6 +682,10 @@ func TestCLIStreamEdit(t *testing.T) {
 
 	if mem1.Subjects()[0] != "MEMORY.*" {
 		t.Fatalf("expected [MEMORY.*] got %v", mem1.Subjects())
+	}
+
+	if mem1.DirectAllowed() {
+		t.Fatalf("expected direct access to be disabled")
 	}
 }
 
@@ -729,59 +740,11 @@ func TestCLIConsumerCopy(t *testing.T) {
 	}
 }
 
-func TestCLIBackupRestore(t *testing.T) {
-	srv, _, mgr := setupConsTest(t)
-	defer srv.Shutdown()
-
-	dir, err := ioutil.TempDir("", "")
-	checkErr(t, err, "temp dir failed")
-	defer os.RemoveAll(dir)
-
-	target := filepath.Join(dir, "backup")
-
-	mem1, err := mgr.LoadStream("mem1")
-	checkErr(t, err, "fetch mem1 failed")
-	origMem1Config := mem1.Configuration()
-
-	c1, err := mem1.NewConsumerFromDefault(jsm.DefaultConsumer, jsm.DurableName("c1"))
-	checkErr(t, err, "consumer c1 failed")
-	origC1Config := c1.Configuration()
-
-	t1, err := mgr.NewStreamTemplate("t1", 1, jsm.DefaultStream, jsm.Subjects("t1"), jsm.MemoryStorage())
-	checkErr(t, err, "TEST template create failed: %s", err)
-	origT1Config := t1.Configuration()
-
-	runNatsCli(t, fmt.Sprintf("--server='%s' backup '%s'", srv.ClientURL(), target))
-
-	checkErr(t, mem1.Delete(), "mem1 delete failed")
-	checkErr(t, t1.Delete(), "t1 delete failed")
-
-	runNatsCli(t, fmt.Sprintf("--server='%s' restore '%s'", srv.ClientURL(), target))
-
-	mem1, err = mgr.LoadStream("mem1")
-	checkErr(t, err, "fetch mem1 failed")
-	if !cmp.Equal(mem1.Configuration(), origMem1Config) {
-		t.Fatalf("mem1 recreate failed")
-	}
-
-	c1, err = mem1.LoadConsumer("c1")
-	checkErr(t, err, "fetch c1 failed")
-	if !cmp.Equal(c1.Configuration(), origC1Config) {
-		t.Fatalf("mem1 recreate failed")
-	}
-
-	t1, err = mgr.LoadStreamTemplate("t1")
-	checkErr(t, err, "template load failed")
-	if !cmp.Equal(t1.Configuration(), origT1Config) {
-		t.Fatalf("mem1 recreate failed")
-	}
-}
-
 func TestCLIStreamBackupRestore(t *testing.T) {
 	srv, nc, mgr := setupConsTest(t)
 	defer srv.Shutdown()
 
-	dir, err := ioutil.TempDir("", "")
+	dir, err := os.MkdirTemp("", "")
 	checkErr(t, err, "temp dir failed")
 	defer os.RemoveAll(dir)
 	target := filepath.Join(dir, "backup.tgz")
@@ -810,36 +773,6 @@ func TestCLIStreamBackupRestore(t *testing.T) {
 	checkErr(t, err, "state failed")
 	if state.LastSeq != 1024 {
 		t.Fatalf("expected 1024 messages got %d", state.LastSeq)
-	}
-}
-
-func TestCLIBackupRestore_UpdateStream(t *testing.T) {
-	srv, _, mgr := setupConsTest(t)
-	defer srv.Shutdown()
-
-	dir, err := ioutil.TempDir("", "")
-	checkErr(t, err, "temp dir failed")
-	defer os.RemoveAll(dir)
-
-	target := filepath.Join(dir, "backup")
-
-	mem1, err := mgr.LoadStream("mem1")
-	checkErr(t, err, "fetch mem1 failed")
-
-	runNatsCli(t, fmt.Sprintf("--server='%s' backup '%s'", srv.ClientURL(), target))
-
-	runNatsCli(t, fmt.Sprintf("--server='%s' stream edit mem1 -f --subjects x", srv.ClientURL()))
-	checkErr(t, mem1.Reset(), "reset failed")
-	subs := mem1.Subjects()
-	if len(subs) != 1 || subs[0] != "x" {
-		t.Fatalf("expected [x] got %q", subs)
-	}
-
-	runNatsCli(t, fmt.Sprintf("--server='%s' restore '%s' --update-streams", srv.ClientURL(), target))
-	checkErr(t, mem1.Reset(), "reset failed")
-	subs = mem1.Subjects()
-	if len(subs) != 1 || subs[0] != "js.mem.>" {
-		t.Fatalf("expected [js.mem.>] got %q", subs)
 	}
 }
 

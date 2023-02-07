@@ -4,18 +4,20 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go/natscontext"
 	"github.com/nats-io/nats-server/v2/server"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type SrvRunCmd struct {
@@ -39,6 +41,7 @@ type SrvRunConfig struct {
 	Debug                bool
 	StoreDir             string
 	Listen               string
+	Clean                bool
 	Context              *natscontext.Context
 }
 
@@ -50,14 +53,14 @@ trace: {{.Verbose}}
 system_account: SYSTEM
 logtime: false
 
-{{ if .JetStream }}
+{{- if .JetStream }}
 jetstream {
     store_dir: {{ .StoreDir }}
-{{ if .JSDomain }}
+{{- if .JSDomain }}
 	domain: {{ .JSDomain }}
-{{ end }}
+{{- end }}
 }
-{{ end }}
+{{- end }}
 
 accounts {
     USER: {
@@ -74,7 +77,7 @@ accounts {
         ]
     }
 
-	SERVICE: {
+    SERVICE: {
         jetstream: enabled
         users: [
             {
@@ -86,7 +89,7 @@ accounts {
         exports: [
             {service: service.>}
         ]
-	}
+    }
 
     SYSTEM: {
         users: [{"user": "system", "password": "{{.SystemPasswordCrypt}}"}],
@@ -114,16 +117,17 @@ leafnodes {
 }
 `
 
-func configureServerRunCommand(srv *kingpin.CmdClause) {
+func configureServerRunCommand(srv *fisk.CmdClause) {
 	c := &SrvRunCmd{}
 
 	run := srv.Command("run", "Runs a local development NATS server").Hidden().Action(c.runAction)
 	run.Arg("name", "Uses a named context for local access to the server").Default("nats_development").StringVar(&c.config.Name)
-	run.Flag("extend-demo", "Extends the NATS demo network").BoolVar(&c.config.ExtendDemoNetwork)
-	run.Flag("extend", "Extends a NATS network using a context").BoolVar(&c.config.ExtendWithContext)
-	run.Flag("jetstream", "Enables JetStream support").BoolVar(&c.config.JetStream)
+	run.Flag("extend-demo", "Extends the NATS demo network").UnNegatableBoolVar(&c.config.ExtendDemoNetwork)
+	run.Flag("extend", "Extends a NATS network using a context").UnNegatableBoolVar(&c.config.ExtendWithContext)
+	run.Flag("jetstream", "Enables JetStream support").UnNegatableBoolVar(&c.config.JetStream)
 	run.Flag("port", "Sets the local listening port").Default("-1").StringVar(&c.config.Port)
-	run.Flag("verbose", "Log in debug mode").BoolVar(&c.config.Debug)
+	run.Flag("clean", "Remove contexts after exiting").UnNegatableBoolVar(&c.config.Clean)
+	run.Flag("verbose", "Log in debug mode").UnNegatableBoolVar(&c.config.Debug)
 }
 
 // server doesnt know what port -1 will pick since its the os at Listen time that does it
@@ -179,6 +183,39 @@ func (c *SrvRunCmd) prepareConfig() error {
 		c.config.Verbose = true
 	}
 
+	// we use existing contexts to re-use previously generated
+	// passwords and ports
+	if natscontext.IsKnown(c.config.Name) {
+		nctx, err := natscontext.New(c.config.Name, true)
+		if err != nil {
+			return err
+		}
+		c.config.UserPassword = nctx.Password()
+		u, err := url.Parse(nctx.ServerURL())
+		if err != nil {
+			return err
+		}
+		c.config.Port = u.Port()
+	}
+
+	svcName := fmt.Sprintf("%s_service", c.config.Name)
+	if natscontext.IsKnown(svcName) {
+		nctx, err := natscontext.New(svcName, true)
+		if err != nil {
+			return err
+		}
+		c.config.ServicePassword = nctx.Password()
+	}
+
+	sysName := fmt.Sprintf("%s_system", c.config.Name)
+	if natscontext.IsKnown(sysName) {
+		nctx, err := natscontext.New(sysName, true)
+		if err != nil {
+			return err
+		}
+		c.config.SystemPassword = nctx.Password()
+	}
+
 	if c.config.Port == "-1" {
 		p, err := c.getRandomPort()
 		if err != nil {
@@ -188,21 +225,27 @@ func (c *SrvRunCmd) prepareConfig() error {
 		c.config.Port = p
 	}
 
-	c.config.UserPassword = randomString(32, 32)
+	if c.config.UserPassword == "" {
+		c.config.UserPassword = randomString(32, 32)
+	}
 	b, err := bcrypt.GenerateFromPassword([]byte(c.config.UserPassword), 5)
 	if err != nil {
 		return err
 	}
 	c.config.UserPasswordCrypt = string(b)
 
-	c.config.SystemPassword = randomString(32, 32)
+	if c.config.SystemPassword == "" {
+		c.config.SystemPassword = randomString(32, 32)
+	}
 	b, err = bcrypt.GenerateFromPassword([]byte(c.config.SystemPassword), 5)
 	if err != nil {
 		return err
 	}
 	c.config.SystemPasswordCrypt = string(b)
 
-	c.config.ServicePassword = randomString(32, 32)
+	if c.config.ServicePassword == "" {
+		c.config.ServicePassword = randomString(32, 32)
+	}
 	b, err = bcrypt.GenerateFromPassword([]byte(c.config.ServicePassword), 5)
 	if err != nil {
 		return err
@@ -215,6 +258,10 @@ func (c *SrvRunCmd) prepareConfig() error {
 			return err
 		}
 		c.config.StoreDir = filepath.Join(parent, "nats", c.config.Name)
+		if runtime.GOOS == "windows" {
+			// escape path separator in file
+			c.config.StoreDir = strings.ReplaceAll(c.config.StoreDir, "\\", "\\\\")
+		}
 		if c.config.ExtendWithContext || c.config.ExtendDemoNetwork {
 			c.config.JSDomain = strings.ToUpper(c.config.Name)
 		}
@@ -265,58 +312,53 @@ func (c *SrvRunCmd) interruptWatcher(ctx context.Context, cancel context.CancelF
 }
 
 func (c *SrvRunCmd) configureContexts(url string) (string, string, string, error) {
+	if !natscontext.IsKnown(c.config.Name) {
+		nctx, _ := natscontext.New(c.config.Name, false,
+			natscontext.WithServerURL(url),
+			natscontext.WithUser("local"),
+			natscontext.WithPassword(c.config.UserPassword),
+			natscontext.WithDescription("Local user access for NATS Development instance"),
+			natscontext.WithJSDomain(c.config.JSDomain),
+		)
+		err := nctx.Save(nctx.Name)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+
 	svcName := fmt.Sprintf("%s_service", c.config.Name)
+	if !natscontext.IsKnown(svcName) {
+		nctx, _ := natscontext.New(svcName, false,
+			natscontext.WithServerURL(url),
+			natscontext.WithUser("service"),
+			natscontext.WithPassword(c.config.ServicePassword),
+			natscontext.WithDescription("Local service access for NATS Development instance"),
+			natscontext.WithJSDomain(c.config.JSDomain),
+		)
+		err := nctx.Save(svcName)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+
 	sysName := fmt.Sprintf("%s_system", c.config.Name)
-
-	if natscontext.IsKnown(c.config.Name) {
-		return "", "", "", fmt.Errorf("context %s already exist, choose a new instance name or remove it with 'nats context rm %s'", c.config.Name, c.config.Name)
-	}
-	if natscontext.IsKnown(svcName) {
-		return "", "", "", fmt.Errorf("context %s already exist, choose a new instance name or remove it with 'nats context rm %s'", svcName, svcName)
-	}
-	if natscontext.IsKnown(sysName) {
-		return "", "", "", fmt.Errorf("context %s already exist, choose a new instance name or remove it with 'nats context rm %s'", sysName, sysName)
-	}
-
-	nctx, _ := natscontext.New(c.config.Name, false,
-		natscontext.WithServerURL(url),
-		natscontext.WithUser("local"),
-		natscontext.WithPassword(c.config.UserPassword),
-		natscontext.WithDescription("Local user access for NATS Development instance"),
-		natscontext.WithJSDomain(c.config.JSDomain),
-	)
-	err := nctx.Save(nctx.Name)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	nctx, _ = natscontext.New(svcName, false,
-		natscontext.WithServerURL(url),
-		natscontext.WithUser("service"),
-		natscontext.WithPassword(c.config.ServicePassword),
-		natscontext.WithDescription("Local service access for NATS Development instance"),
-		natscontext.WithJSDomain(c.config.JSDomain),
-	)
-	err = nctx.Save(svcName)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	nctx, _ = natscontext.New(sysName, false,
-		natscontext.WithServerURL(url),
-		natscontext.WithUser("system"),
-		natscontext.WithPassword(c.config.SystemPassword),
-		natscontext.WithDescription("System user access for NATS Development instance"),
-	)
-	err = nctx.Save(nctx.Name)
-	if err != nil {
-		return "", "", "", err
+	if !natscontext.IsKnown(sysName) {
+		nctx, _ := natscontext.New(sysName, false,
+			natscontext.WithServerURL(url),
+			natscontext.WithUser("system"),
+			natscontext.WithPassword(c.config.SystemPassword),
+			natscontext.WithDescription("System user access for NATS Development instance"),
+		)
+		err := nctx.Save(nctx.Name)
+		if err != nil {
+			return "", "", "", err
+		}
 	}
 
 	return c.config.Name, svcName, sysName, nil
 }
 
-func (c *SrvRunCmd) runAction(_ *kingpin.ParseContext) error {
+func (c *SrvRunCmd) runAction(_ *fisk.ParseContext) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -344,9 +386,6 @@ func (c *SrvRunCmd) runAction(_ *kingpin.ParseContext) error {
 	if err != nil {
 		return err
 	}
-	defer natscontext.DeleteContext(u)
-	defer natscontext.DeleteContext(s)
-	defer natscontext.DeleteContext(svc)
 
 	fmt.Printf("Starting local development NATS Server instance: %s\n", c.config.Name)
 	fmt.Println()
@@ -363,6 +402,20 @@ func (c *SrvRunCmd) runAction(_ *kingpin.ParseContext) error {
 		fmt.Printf("   Extending Remote NATS: %v\n", c.config.ExtendWithContext)
 	}
 	fmt.Printf("                     URL: %s\n", srv.ClientURL())
+
+	if c.config.Clean {
+		fmt.Println("           Clean on Exit: true")
+		defer natscontext.DeleteContext(u)
+		defer natscontext.DeleteContext(s)
+		defer natscontext.DeleteContext(svc)
+	} else {
+		fmt.Println("           Clean on Exit: false")
+	}
+
+	fmt.Println()
+	fmt.Println()
+	fmt.Println("NOTE: This is not a supported way to run a production NATS Server, view documentation")
+	fmt.Println("      at https://docs.nats.io/running-a-nats-service/introduction for production use.")
 
 	fmt.Println()
 

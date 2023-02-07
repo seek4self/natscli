@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type rttCmd struct {
@@ -48,14 +48,14 @@ func configureRTTCommand(app commandHost) {
 
 	rtt := app.Command("rtt", "Compute round-trip time to NATS server").Action(c.rtt)
 	rtt.Arg("iterations", "How many round trips to do when testing").Default("5").IntVar(&c.iterations)
-	rtt.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
+	rtt.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 }
 
 func init() {
 	registerCommand("rtt", 13, configureRTTCommand)
 }
 
-func (c *rttCmd) rtt(_ *kingpin.ParseContext) error {
+func (c *rttCmd) rtt(_ *fisk.ParseContext) error {
 	targets, err := c.targets()
 	if err != nil {
 		return err

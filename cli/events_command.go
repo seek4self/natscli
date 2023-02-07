@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,10 +20,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type eventsCmd struct {
@@ -47,22 +47,16 @@ func configureEventsCommand(app commandHost) {
 	c := &eventsCmd{}
 
 	events := app.Command("events", "Show Advisories and Events").Alias("event").Alias("e").Action(c.eventsAction)
-	events.Flag("all", "Show all events").Default("false").Short('a').BoolVar(&c.showAll)
-	events.Flag("json", "Produce JSON output").Short('j').BoolVar(&c.json)
-	events.Flag("cloudevent", "Produce CloudEvents v1 output").BoolVar(&c.ce)
-	events.Flag("short", "Short event format").BoolVar(&c.short)
+	addCheat("events", events)
+	events.Flag("all", "Show all events").Short('a').UnNegatableBoolVar(&c.showAll)
+	events.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	events.Flag("cloudevent", "Produce CloudEvents v1 output").UnNegatableBoolVar(&c.ce)
+	events.Flag("short", "Short event format").UnNegatableBoolVar(&c.short)
 	events.Flag("filter", "Filter across the entire event using regular expressions").Default(".").StringVar(&c.bodyF)
-	events.Flag("js-metric", "Shows JetStream metric events (false)").Default("false").BoolVar(&c.showJsMetrics)
-	events.Flag("js-advisory", "Shows advisory events (false)").Default("false").BoolVar(&c.showJsAdvisories)
+	events.Flag("js-metric", "Shows JetStream metric events (false)").UnNegatableBoolVar(&c.showJsMetrics)
+	events.Flag("js-advisory", "Shows advisory events (false)").UnNegatableBoolVar(&c.showJsAdvisories)
 	events.Flag("srv-advisory", "Shows NATS Server advisories (true)").Default("true").BoolVar(&c.showServerAdvisories)
 	events.Flag("subjects", "Show Advisories and Metrics received on specific subjects").PlaceHolder("SUBJECTS").StringsVar(&c.extraSubjects)
-
-	cheats["events"] = `# To view common system events
-nats events
-nats events --short --all
-nats events --no-srv-advisory --js-metric --js-advisory
-nats events --no-srv-advisory --subjects service.latency.weather
-`
 }
 
 func init() {
@@ -125,22 +119,22 @@ func (c *eventsCmd) handleNATSEvent(m *nats.Msg) {
 	}
 }
 
-func (c *eventsCmd) Printf(f string, arg ...interface{}) {
+func (c *eventsCmd) Printf(f string, arg ...any) {
 	if !c.json {
 		fmt.Printf(f, arg...)
 	}
 }
 
-func (c *eventsCmd) eventsAction(_ *kingpin.ParseContext) error {
+func (c *eventsCmd) eventsAction(_ *fisk.ParseContext) error {
 	if c.ce {
 		c.json = true
 	}
 
 	nc, _, err := prepareHelper("", natsOpts()...)
-	kingpin.FatalIfError(err, "setup failed")
+	fisk.FatalIfError(err, "setup failed")
 
 	c.bodyFRe, err = regexp.Compile(strings.ToUpper(c.bodyF))
-	kingpin.FatalIfError(err, "invalid body regular expression")
+	fisk.FatalIfError(err, "invalid body regular expression")
 
 	if !c.showAll && !c.showJsAdvisories && !c.showJsMetrics && !c.showServerAdvisories && len(c.extraSubjects) == 0 {
 		return fmt.Errorf("no events were chosen")
