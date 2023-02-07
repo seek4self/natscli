@@ -18,8 +18,8 @@ import (
 	"os"
 	"runtime/debug"
 
+	"github.com/choria-io/fisk"
 	"github.com/nats-io/natscli/cli"
-	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var version = "development"
@@ -31,7 +31,7 @@ STHG-MS and JetStream administration.
 
 See 'ms-client cheat' for a quick cheatsheet of commands`
 
-	ncli := kingpin.New("ms-client", help)
+	ncli := fisk.New("ms-client", help)
 	ncli.Author("STHG Authors")
 	ncli.UsageWriter(os.Stdout)
 	ncli.Version(getVersion())
@@ -67,7 +67,7 @@ See 'ms-client cheat' for a quick cheatsheet of commands`
 
 	log.SetFlags(log.Ltime)
 
-	kingpin.MustParse(ncli.Parse(os.Args[1:]))
+	ncli.MustParseWithUsage(os.Args[1:])
 }
 
 func getVersion() string {
