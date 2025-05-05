@@ -14,7 +14,7 @@
 package cli
 
 func configureAuthCommand(app commandHost) {
-	auth := app.Command("auth", "NATS Decentralized Authentication")
+	auth := app.Command("auth", "STHG-MS Decentralized Authentication")
 	addCheat("auth", auth)
 
 	// todo:

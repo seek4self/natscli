@@ -47,7 +47,7 @@ func (c *serverGenerateCmd) generateAction(_ *fisk.ParseContext) error {
 		return fmt.Errorf("target directory %s already exist", c.target)
 	}
 
-	fmt.Println("This tool generates NATS Server configurations based on a question and answer")
+	fmt.Println("This tool generates STHG-MS Server configurations based on a question and answer")
 	fmt.Println("form-based approach and then renders the result into a directory.")
 	fmt.Println()
 	fmt.Println("It supports rendering local bundles compiled into the 'nats' command but can also")
@@ -111,10 +111,10 @@ func (c *serverGenerateCmd) generateAction(_ *fisk.ParseContext) error {
 
 func (c *serverGenerateCmd) pickEmbedded() error {
 	list := map[string]string{
-		"Development Super Cluster using Docker Compose": "fs:///natsbuilder",
-		"'nats auth' managed NATS Server configuration":  "fs:///operator",
-		"'nats auth' managed NATS Cluster in Kubernetes": "fs:///operatork8s",
-		"Synadia Cloud Leafnode Configuration":           "fs:///ngsleafnodeconfig",
+		"Development Super Cluster using Docker Compose":         "fs:///msbuilder",
+		"'ms-client auth' managed STHG-MS Server configuration":  "fs:///operator",
+		"'ms-client auth' managed STHG-MS Cluster in Kubernetes": "fs:///operatork8s",
+		"Synadia Cloud Leafnode Configuration":                   "fs:///ngsleafnodeconfig",
 	}
 
 	names := []string{}

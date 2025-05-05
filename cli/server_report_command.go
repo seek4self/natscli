@@ -80,7 +80,7 @@ func configureServerReportCommand(srv *fisk.CmdClause) {
 	report.Flag("reverse", "Reverse sort connections").Short('R').UnNegatableBoolVar(&c.reverse)
 
 	addFilterOpts := func(cmd *fisk.CmdClause) {
-		cmd.Flag("host", "Limit the report to a specific NATS server").StringVar(&c.server)
+		cmd.Flag("host", "Limit the report to a specific STHG-MS server").StringVar(&c.server)
 		cmd.Flag("cluster", "Limit the report to a specific Cluster").StringVar(&c.cluster)
 		cmd.Flag("tags", "Limit the report to nodes matching certain tags").StringsVar(&c.tags)
 		cmd.Flag("watch", "Display the results and update it every (WATCH) seconds").IntVar(&c.watchInterval)

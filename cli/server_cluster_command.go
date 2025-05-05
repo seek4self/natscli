@@ -259,7 +259,7 @@ func (c *SrvClusterCmd) metaLeaderStandDownAction(_ *fisk.ParseContext) error {
 
 	if c.placementNode != "" || len(c.placementTags) > 0 {
 		// TODO: check api level instead but requires https://github.com/nats-io/nats-server/issues/6681
-		fmt.Println("WARNING: Using placement tags or node name required NATS Server 2.11 or newer")
+		fmt.Println("WARNING: Using placement tags or node name required STHG-MS Server 2.11 or newer")
 		fmt.Println()
 	}
 

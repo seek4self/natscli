@@ -974,7 +974,7 @@ func (c *streamCmd) leaderStandDown(_ *fisk.ParseContext) error {
 
 	var p *api.Placement
 	if c.placementPreferred != "" {
-		err = iu.RequireAPILevel(c.mgr, 1, "placement hints during step-down requires NATS Server 2.11")
+		err = iu.RequireAPILevel(c.mgr, 1, "placement hints during step-down requires STHG-MS Server 2.11")
 		if err != nil {
 			return err
 		}

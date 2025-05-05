@@ -130,7 +130,7 @@ func configureServerCheckCommand(srv *fisk.CmdClause) {
 		msgHeadersMatch: make(map[string]string),
 	}
 
-	check := srv.Command("check", "Health check for NATS servers")
+	check := srv.Command("check", "Health check for STHG-MS servers")
 	check.Flag("format", "Render the check in a specific format (nagios, json, prometheus, text)").Default("nagios").EnumVar(&checkRenderFormatText, "nagios", "json", "prometheus", "text")
 	check.Flag("namespace", "The prometheus namespace to use in output").Default(opts().PrometheusNamespace).StringVar(&opts().PrometheusNamespace)
 	check.Flag("outfile", "Save output to a file rather than STDOUT").StringVar(&checkRenderOutFile)
@@ -214,7 +214,7 @@ When set these settings will be used, but can be overridden using --waiting-crit
 	js.Flag("replica-seen-critical", "Critical threshold for when a stream replica should have been seen, as a duration").Default("5s").DurationVar(&c.jsReplicaSeenCritical)
 	js.Flag("replica-lag-critical", "Critical threshold for how many operations behind a peer can be").Default("200").Uint64Var(&c.jsReplicaLagCritical)
 
-	serv := check.Command("server", "Checks a NATS Server health").Action(c.checkSrv)
+	serv := check.Command("server", "Checks a STHG-MS Server health").Action(c.checkSrv)
 	serv.Flag("name", "Server name to require in the result").Required().StringVar(&c.srvName)
 	serv.Flag("cpu-warn", "Warning threshold for CPU usage, in percent").IntVar(&c.srvCPUWarn)
 	serv.Flag("cpu-critical", "Critical threshold for CPU usage, in percent").IntVar(&c.srvCPUCrit)
@@ -230,14 +230,14 @@ When set these settings will be used, but can be overridden using --waiting-crit
 	serv.Flag("tls-required", "Checks that TLS is required").UnNegatableBoolVar(&c.srvTLSRequired)
 	serv.Flag("js-required", "Checks that JetStream is enabled").UnNegatableBoolVar(&c.srvJSRequired)
 
-	kv := check.Command("kv", "Checks a NATS KV Bucket").Action(c.checkKV)
+	kv := check.Command("kv", "Checks a STHG-MS KV Bucket").Action(c.checkKV)
 	kv.Flag("bucket", "Checks a specific bucket").Required().StringVar(&c.kvBucket)
 	kv.Flag("values-critical", "Critical threshold for number of values in the bucket").Default("-1").Int64Var(&c.kvValuesCrit)
 	kv.Flag("values-warn", "Warning threshold for number of values in the bucket").Default("-1").Int64Var(&c.kvValuesWarn)
 	kv.Flag("key", "Requires a key to have any non-delete value set").StringVar(&c.kvKey)
 
-	cred := check.Command("credential", "Checks the validity of a NATS credential file").Action(c.checkCredentialAction)
-	cred.Flag("credential", "The file holding the NATS credential").Required().StringVar(&c.credential)
+	cred := check.Command("credential", "Checks the validity of a STHG-MS credential file").Action(c.checkCredentialAction)
+	cred.Flag("credential", "The file holding the STHG-MS credential").Required().StringVar(&c.credential)
 	cred.Flag("validity-warn", "Warning threshold for time before expiry").DurationVar(&c.credentialValidityWarn)
 	cred.Flag("validity-critical", "Critical threshold for time before expiry").DurationVar(&c.credentialValidityCrit)
 	cred.Flag("require-expiry", "Requires the credential to have expiry set").Default("true").BoolVar(&c.credentialRequiresExpire)

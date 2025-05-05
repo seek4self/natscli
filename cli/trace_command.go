@@ -66,7 +66,7 @@ func configureTraceCommand(app commandHost) {
 		header: make(map[string]string),
 	}
 
-	trace := app.Command("trace", "Trace message delivery within an NATS network").Action(c.traceAction)
+	trace := app.Command("trace", "Trace message delivery within an STHG-MS network").Action(c.traceAction)
 	trace.Arg("subject", "The subject to publish to").Required().StringVar(&c.subject)
 	trace.Arg("payload", "The message body to send").BytesVar(&c.payload)
 	trace.Flag("deliver", "Deliver the message to the final destination").UnNegatableBoolVar(&c.deliver)
@@ -85,7 +85,7 @@ func (c *traceCmd) traceAction(_ *fisk.ParseContext) error {
 	}
 
 	if !iu.ServerMinVersion(nc, 2, 11, 0) {
-		return fmt.Errorf("tracing messages require NATS Server 2.11")
+		return fmt.Errorf("tracing messages require STHG-MS Server 2.11")
 	}
 
 	msg := nats.NewMsg(c.subject)

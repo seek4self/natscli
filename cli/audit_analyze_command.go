@@ -180,9 +180,9 @@ func (c *auditAnalyzeCmd) renderJSON(report *audit.Analysis) error {
 
 func (c *auditAnalyzeCmd) renderConsole(report *audit.Analysis) error {
 	if c.archivePath != "" {
-		fmt.Printf("NATS Audit Report %q captured at %s\n\n", c.archivePath, f(report.Metadata.Timestamp))
+		fmt.Printf("STHG-MS Audit Report %q captured at %s\n\n", c.archivePath, f(report.Metadata.Timestamp))
 	} else {
-		fmt.Printf("NATS Audit Report %q captured at %s\n\n", c.loadPath, f(report.Metadata.Timestamp))
+		fmt.Printf("STHG-MS Audit Report %q captured at %s\n\n", c.loadPath, f(report.Metadata.Timestamp))
 	}
 
 	for _, res := range report.Results {

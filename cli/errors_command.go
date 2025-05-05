@@ -112,8 +112,8 @@ func (c *errCmd) listAction(_ *fisk.ParseContext) error {
 		}
 	})
 
-	table := iu.NewTableWriter(opts(), "NATS Errors")
-	table.AddHeaders("NATS Code", "HTTP Error Code", "Description", "Comment", "Go Constant")
+	table := iu.NewTableWriter(opts(), "STHG-MS Errors")
+	table.AddHeaders("STHG-MS Code", "HTTP Error Code", "Description", "Comment", "Go Constant")
 	for _, v := range matched {
 		table.AddRow(v.ErrCode, v.Code, v.Description, v.Comment, v.Constant)
 	}
@@ -219,7 +219,7 @@ func (c *errCmd) lookupAction(_ *fisk.ParseContext) error {
 
 	for _, v := range errs {
 		if v.ErrCode == c.code {
-			cols := newColumns(fmt.Sprintf("NATS Error Code: %s", boldf("%d", v.ErrCode)))
+			cols := newColumns(fmt.Sprintf("STHG-MS Error Code: %s", boldf("%d", v.ErrCode)))
 			cols.AddRow("Description", v.Description)
 			cols.AddRowIfNotEmpty("Comment", v.Comment)
 			cols.AddRow("HTTP Code", v.Code)

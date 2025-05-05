@@ -1,39 +1,39 @@
 # to create a replicated bucket
-nats obj add FILES --replicas 3
+ms-client obj add FILES --replicas 3
 
 # store a file in the bucket
-nats obj put FILES image.jpg
+ms-client obj put FILES image.jpg
 
 # store contents of STDIN in the bucket
-cat x.jpg|nats obj put FILES --name image.jpg
+cat x.jpg|ms-client obj put FILES --name image.jpg
 
 # retrieve a file from a bucket
-nats obj get FILES image.jpg -O out.jpg
+ms-client obj get FILES image.jpg -O out.jpg
 
 # delete a file
-nats obj del FILES image.jpg
+ms-client obj del FILES image.jpg
 
 # delete a bucket
-nats obj del FILES
+ms-client obj del FILES
 
 # view bucket info
-nats obj info FILES
+ms-client obj info FILES
 
 # view file info
-nats obj info FILES image.jpg
+ms-client obj info FILES image.jpg
 
 # list known buckets
-nats obj ls
+ms-client obj ls
 
 # view all files in a bucket
-nats obj ls FILES
+ms-client obj ls FILES
 
 # prevent further modifications to the bucket
-nats obj seal FILES
+ms-client obj seal FILES
 
 # create a bucket backup for FILES into backups/FILES
-nats obj status FILES
-nats stream backup <stream name> backups/FILES
+ms-client obj status FILES
+ms-client stream backup <stream name> backups/FILES
 
 # restore a bucket from a backup
-nats stream restore <stream name> backups/FILES
+ms-client stream restore <stream name> backups/FILES

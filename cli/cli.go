@@ -16,11 +16,12 @@ package cli
 import (
 	"context"
 	"embed"
-	"github.com/nats-io/natscli/options"
 	glog "log"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/nats-io/natscli/options"
 
 	"github.com/choria-io/fisk"
 )
@@ -55,8 +56,8 @@ var (
 	fs embed.FS
 
 	// These are persisted by contexts, as properties thereof.
-	// So don't include NATS_CONTEXT in this list.
-	overrideEnvVars = []string{"NATS_URL", "NATS_USER", "NATS_PASSWORD", "NATS_CREDS", "NATS_NKEY", "NATS_CERT", "NATS_KEY", "NATS_CA", "NATS_TIMEOUT", "NATS_SOCKS_PROXY", "NATS_COLOR"}
+	// So don't include MS_CONTEXT in this list.
+	overrideEnvVars = []string{"MS_URL", "MS_USER", "MS_PASSWORD", "MS_CREDS", "MS_NKEY", "MS_CERT", "MS_KEY", "MS_CA", "MS_TIMEOUT", "MS_SOCKS_PROXY", "MS_COLOR"}
 )
 
 func registerCommand(name string, order int, c func(app commandHost)) {

@@ -110,7 +110,7 @@ func (c *serviceCmd) serveAction(_ *fisk.ParseContext) error {
 	srv, err := micro.AddService(c.nc, micro.Config{
 		Name:        c.name,
 		Version:     "1.0.0",
-		Description: fmt.Sprintf("NATS CLI Demo Service (%s)", c.name),
+		Description: fmt.Sprintf("MS CLI Demo Service (%s)", c.name),
 		Metadata: map[string]string{
 			"_nats.client.created.library": "natscli",
 			"_nats.client.created.version": Version,
@@ -140,7 +140,7 @@ func (c *serviceCmd) serveAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	cols := newColumns("NATS CLI Service %s handler %d waiting for requests on %s", c.name, os.Getpid(), c.nc.ConnectedUrlRedacted())
+	cols := newColumns("STHG-MS CLI Service %s handler %d waiting for requests on %s", c.name, os.Getpid(), c.nc.ConnectedUrlRedacted())
 	cols.AddSectionTitle("Listening Subjects")
 	cols.AddRow(fmt.Sprintf("%s.echo", c.name), "Echo Service")
 	if len(c.hdrs) > 0 {

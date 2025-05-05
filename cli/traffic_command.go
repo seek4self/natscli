@@ -88,7 +88,7 @@ func (r *rateTrackInt) Rate() int64 {
 func configureTrafficCommand(app commandHost) {
 	c := &trafficCmd{}
 
-	traffic := app.Command("traffic", "Monitor NATS network traffic").Hidden().Action(c.monitor)
+	traffic := app.Command("traffic", "Monitor STHG-MS network traffic").Hidden().Action(c.monitor)
 	traffic.Arg("subjects", "Subjects to monitor, defaults to all").Default(">").StringVar(&c.subjects)
 }
 

@@ -1,8 +1,8 @@
 # To see all available schemas using regular expressions
-nats schema search 'response|request'
+ms-client schema search 'response|request'
 
 # To view a specific schema
-nats schema info io.nats.jetstream.api.v1.stream_msg_get_request --yaml
+ms-client schema info io.ms-client.jetstream.api.v1.stream_msg_get_request --yaml
 
 # To validate a JSON input against a specific schema
-nats schema validate io.nats.jetstream.api.v1.stream_msg_get_request request.json
+ms-client schema validate io.ms-client.jetstream.api.v1.stream_msg_get_request request.json

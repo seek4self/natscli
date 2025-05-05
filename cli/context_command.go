@@ -85,11 +85,11 @@ func configureCtxCommand(app commandHost) {
 	info := context.Command("info", "Display information on the current or named context").Alias("show").Alias("v").Alias("view").Action(c.showCommand)
 	info.Arg("name", "The context name to show").StringVar(&c.name)
 	info.Flag("json", "Show the context in JSON format").Short('j').UnNegatableBoolVar(&c.json)
-	info.Flag("connect", "Attempts to connect to NATS using the context while validating").UnNegatableBoolVar(&c.activate)
+	info.Flag("connect", "Attempts to connect to STHG-MS using the context while validating").UnNegatableBoolVar(&c.activate)
 
 	validate := context.Command("validate", "Validate one or all contexts").Action(c.validateCommand)
 	validate.Arg("name", "Validate a specific context, validates all when not supplied").StringVar(&c.name)
-	validate.Flag("connect", "Attempts to connect to NATS using the context while validating").UnNegatableBoolVar(&c.activate)
+	validate.Flag("connect", "Attempts to connect to STHG-MS using the context while validating").UnNegatableBoolVar(&c.activate)
 
 	context.Command("previous", "switch to the previous context").Alias("-").Action(c.switchPreviousCtx)
 }
@@ -154,14 +154,14 @@ func (c *ctxCommand) copyCommand(pc *fisk.ParseContext) error {
 var ctxYamlTemplate = `# Friendly description for this context shown when listing contexts
 description: {{ .Description | t }}
 
-# A comma separated list of NATS Servers to connect to
+# A comma separated list of STHG-MS Servers to connect to
 url: {{ .ServerURL | t }}
 
 # Connect using a specific username, requires password to be set
 user: {{ .User | t }}
 password: {{ .Password | t }}
 
-# Connect using a NATS Credentials stored in a file
+# Connect using a STHG-MS Credentials stored in a file
 creds: {{ .Creds | t }}
 
 # Connect using a NKey with seed stored in a file
@@ -226,7 +226,7 @@ jetstream_api_prefix: {{ .JSAPIPrefix | t }}
 # Subject prefix used to access JetStream events if imported from another account
 jetstream_event_prefix: {{ .JSEventPrefix | t }}
 
-# Use a Socks5 proxy like ssh to connect to the NATS server URLS
+# Use a Socks5 proxy like ssh to connect to the STHG-MS server URLS
 #
 # Example: socks5://example.net:1090
 socks_proxy: {{ .SocksProxy | t }}
@@ -461,7 +461,7 @@ func (c *ctxCommand) showCommand(_ *fisk.ParseContext) error {
 		return color.GreenString("OK")
 	}
 
-	cols := newColumns(fmt.Sprintf("NATS Configuration Context %q", c.name))
+	cols := newColumns(fmt.Sprintf("STHG-MS Configuration Context %q", c.name))
 	cols.AddRowIfNotEmpty("Description", cfg.Description())
 	cols.AddRowIfNotEmpty("Server URLs", cfg.ServerURL())
 	cols.AddRowIfNotEmpty("SOCKS5 Proxy", cfg.SocksProxy())

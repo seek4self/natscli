@@ -1,8 +1,8 @@
 # To view account information and connection
-nats account info
+ms-client account info
 
 # To report connections for your command
-nats account report connections
+ms-client account report connections
 
 # To backup all JetStream streams
-nats account backup /path/to/backup --check
+ms-client account backup /path/to/backup --check

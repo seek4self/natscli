@@ -115,7 +115,7 @@ type authAccountCommand struct {
 func configureAuthAccountCommand(auth commandHost) {
 	c := &authAccountCommand{}
 
-	acct := auth.Command("account", "Manage NATS Accounts").Alias("a").Alias("acct").Alias("act")
+	acct := auth.Command("account", "Manage STHG-MS Accounts").Alias("a").Alias("acct").Alias("act")
 
 	addCreateFlags := func(f *fisk.CmdClause, edit bool) {
 		f.Flag("bearer", "Allows bearer tokens").Default("false").IsSetByUser(&c.bearerAllowedIsSet).BoolVar(&c.bearerAllowed)
@@ -167,12 +167,12 @@ func configureAuthAccountCommand(auth commandHost) {
 	//rm.Flag("operator", "Operator hosting the Account").StringVar(&c.operatorName)
 	//rm.Flag("force", "Removes without prompting").Short('f').UnNegatableBoolVar(&c.force)
 
-	push := acct.Command("push", "Push the Account to the NATS Resolver").Action(c.pushAction)
+	push := acct.Command("push", "Push the Account to the STHG-MS Resolver").Action(c.pushAction)
 	push.Arg("account", "Account to act on").StringVar(&c.accountName)
 	push.Flag("operator", "Operator to act on").StringVar(&c.operatorName)
 	push.Flag("show", "Show the Account JWT before pushing").UnNegatableBoolVar(&c.showJWT)
 
-	query := acct.Command("query", "Pull the Account from the NATS Resolver and view it").Alias("pull").Action(c.queryAction)
+	query := acct.Command("query", "Pull the Account from the STHG-MS Resolver and view it").Alias("pull").Action(c.queryAction)
 	query.Arg("account", "Account to act on").Required().StringVar(&c.accountName)
 	query.Arg("output", "Saves the JWT to a file").StringVar(&c.output)
 	query.Flag("operator", "Operator to act on").StringVar(&c.operatorName)

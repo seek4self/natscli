@@ -30,7 +30,7 @@ type schemaReqCmd struct {
 func configureSchemaReqCommand(schema *fisk.CmdClause) {
 	c := &schemaReqCmd{}
 
-	req := schema.Command("request", "Request and validate data from a NATS service").Alias("req").Action(c.requestAction)
+	req := schema.Command("request", "Request and validate data from a STHG-MS service").Alias("req").Action(c.requestAction)
 	req.Arg("subject", "The subject to send a request to").Required().StringVar(&c.subject)
 	req.Arg("body", "The body to send").Default(`{}`).StringVar(&c.body)
 	req.Flag("schema", "The schema identifier to validate against").StringVar(&c.schema)

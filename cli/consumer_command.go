@@ -695,7 +695,7 @@ func (c *consumerCmd) leaderStandDownAction(_ *fisk.ParseContext) error {
 
 	var p *api.Placement
 	if c.placementPreferred != "" {
-		err = iu.RequireAPILevel(c.mgr, 1, "placement hints during step-down requires NATS Server 2.11")
+		err = iu.RequireAPILevel(c.mgr, 1, "placement hints during step-down requires STHG-MS Server 2.11")
 		if err != nil {
 			return err
 		}
@@ -1901,7 +1901,7 @@ func (c *consumerCmd) parsePauseUntil(until string) (time.Time, error) {
 func (c *consumerCmd) resumeAction(_ *fisk.ParseContext) error {
 	c.connectAndSetup(true, true)
 
-	err := iu.RequireAPILevel(c.mgr, 1, "resuming Consumers requires NATS Server 2.11")
+	err := iu.RequireAPILevel(c.mgr, 1, "resuming Consumers requires STHG-MS Server 2.11")
 	if err != nil {
 		return err
 	}
@@ -1935,7 +1935,7 @@ func (c *consumerCmd) resumeAction(_ *fisk.ParseContext) error {
 func (c *consumerCmd) pauseAction(_ *fisk.ParseContext) error {
 	c.connectAndSetup(true, true)
 
-	err := iu.RequireAPILevel(c.mgr, 1, "pausing Consumers requires NATS Server 2.11")
+	err := iu.RequireAPILevel(c.mgr, 1, "pausing Consumers requires STHG-MS Server 2.11")
 	if err != nil {
 		return err
 	}
@@ -2104,14 +2104,14 @@ func (c *consumerCmd) createAction(pc *fisk.ParseContext) (err error) {
 
 func (c *consumerCmd) checkConfigLevel(cfg *api.ConsumerConfig) error {
 	if !cfg.PauseUntil.IsZero() {
-		err := iu.RequireAPILevel(c.mgr, 1, "pausing consumers requires NATS Server 2.11")
+		err := iu.RequireAPILevel(c.mgr, 1, "pausing consumers requires STHG-MS Server 2.11")
 		if err != nil {
 			return err
 		}
 	}
 
 	if len(cfg.PriorityGroups) > 0 || cfg.PriorityPolicy != api.PriorityNone {
-		err := iu.RequireAPILevel(c.mgr, 1, "Consumer Groups requires NATS Server 2.11")
+		err := iu.RequireAPILevel(c.mgr, 1, "Consumer Groups requires STHG-MS Server 2.11")
 		if err != nil {
 			return err
 		}

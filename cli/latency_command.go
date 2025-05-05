@@ -44,7 +44,7 @@ type latencyCmd struct {
 func configureLatencyCommand(app commandHost) {
 	c := &latencyCmd{}
 
-	latency := app.Command("latency", "Perform latency tests between two NATS servers").Alias("lat").Action(c.latencyAction)
+	latency := app.Command("latency", "Perform latency tests between two STHG-MS servers").Alias("lat").Action(c.latencyAction)
 	addCheat("latency", latency)
 	latency.Flag("server-b", "The second server to subscribe on").Required().StringVar(&c.serverB)
 	latency.Flag("size", "Message size").Default("8").IntVar(&c.msgSize)

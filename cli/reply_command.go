@@ -15,7 +15,6 @@ package cli
 
 import (
 	"fmt"
-	iu "github.com/nats-io/natscli/internal/util"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -23,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	iu "github.com/nats-io/natscli/internal/util"
 
 	"github.com/choria-io/fisk"
 	"github.com/kballard/go-shellquote"
@@ -56,10 +57,10 @@ This will request the weather for london when invoked as:
 Use {{.Request}} to access the request body within the --command
   
 The command gets also spawned with two ENVs:
-  NATS_REQUEST_SUBJECT
-  NATS_REQUEST_BODY
+  MS_REQUEST_SUBJECT
+  MS_REQUEST_BODY
 
-  nats reply 'echo' --command="printenv NATS_REQUEST_BODY" 
+  nats reply 'echo' --command="printenv MS_REQUEST_BODY" 
   
 The body and Header values of the messages may use Go templates to create unique messages.
 
@@ -84,7 +85,7 @@ Available template functions are:
 	act.Arg("body", "Reply body").StringVar(&c.body)
 	act.Flag("echo", "Echo back what is received").UnNegatableBoolVar(&c.echo)
 	act.Flag("command", "Runs a command and responds with the output if exit code was 0").StringVar(&c.command)
-	act.Flag("queue", "Queue group name").Default("NATS-RPLY-22").Short('q').StringVar(&c.queue)
+	act.Flag("queue", "Queue group name").Default("STHG-MS-RPLY-22").Short('q').StringVar(&c.queue)
 	act.Flag("sleep", "Inject a random sleep delay between replies up to this duration max").PlaceHolder("MAX").DurationVar(&c.sleep)
 	act.Flag("header", "Adds headers to the message using K:V format").Short('H').StringsVar(&c.hdrs)
 	act.Flag("count", "Quit after receiving this many messages").UintVar(&c.limit)
@@ -140,7 +141,7 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 					}
 				}
 
-				msg.Header.Add("NATS-Reply-Counter", strconv.Itoa(i))
+				msg.Header.Add("STHG-MS-Reply-Counter", strconv.Itoa(i))
 			}
 
 			msg.Data = m.Data
@@ -176,8 +177,8 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 
 			cmd := exec.Command(cmdParts[0], args...)
 			cmd.Env = os.Environ()
-			cmd.Env = append(cmd.Env, fmt.Sprintf("NATS_REQUEST_SUBJECT=%s", m.Subject))
-			cmd.Env = append(cmd.Env, fmt.Sprintf("NATS_REQUEST_BODY=%s", string(m.Data)))
+			cmd.Env = append(cmd.Env, fmt.Sprintf("MS_REQUEST_SUBJECT=%s", m.Subject))
+			cmd.Env = append(cmd.Env, fmt.Sprintf("MS_REQUEST_BODY=%s", string(m.Data)))
 			msg.Data, err = cmd.CombinedOutput()
 			if err != nil {
 				log.Printf("Command %q failed to run: %s", rawCmd, err)

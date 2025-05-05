@@ -1,4 +1,4 @@
-// Copyright 2020 The STHG Authors
+// Copyright 2020-2024 The STHG-MS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,11 +14,15 @@
 package main
 
 import (
+	iu "github.com/nats-io/natscli/internal/util"
 	"log"
 	"os"
+	"runtime"
 	"runtime/debug"
 
 	"github.com/choria-io/fisk"
+	"github.com/nats-io/natscli/plugins"
+
 	"github.com/nats-io/natscli/cli"
 )
 
@@ -27,45 +31,59 @@ var version = "development"
 func main() {
 	help := `STHG-MS Utility
 
-STHG-MS and JetStream administration.
+STHG-MS Server and JetStream administration.
 
 See 'ms-client cheat' for a quick cheatsheet of commands`
 
 	ncli := fisk.New("ms-client", help)
-	ncli.Author("STHG Authors")
+	ncli.Author("Aircas")
 	ncli.UsageWriter(os.Stdout)
 	ncli.Version(getVersion())
 	ncli.HelpFlag.Short('h')
+	ncli.WithCheats().CheatCommand.Hidden()
 
 	opts, err := cli.ConfigureInApp(ncli, nil, true,
-		"backup", "context", "errors", "events",
+		"context", "errors", "events",
 		"governor", "kv", "latency", "object",
 		"restore", "rtt", "schema", "server",
 	)
 	if err != nil {
 		return
 	}
-	cli.SetVersion(version)
+	cli.SetVersion(getVersion())
 
-	ncli.Flag("server", "STHG-MS server urls").Short('s').Envar("STHG_URL").PlaceHolder("STHG_URL").StringVar(&opts.Servers)
-	ncli.Flag("user", "Username or Token").Envar("STHG_USER").PlaceHolder("STHG_USER").StringVar(&opts.Username)
-	ncli.Flag("password", "Password").Envar("STHG_PASSWORD").PlaceHolder("STHG_PASSWORD").StringVar(&opts.Password)
-	ncli.Flag("connection-name", "Nickname to use for the underlying STHG-MS Connection").Default("STHG-MS CLI Version " + version).PlaceHolder("NAME").StringVar(&opts.ConnectionName)
-	ncli.Flag("creds", "User credentials").Envar("STHG_CREDS").PlaceHolder("FILE").StringVar(&opts.Creds)
-	ncli.Flag("nkey", "User NKEY").Envar("STHG_NKEY").PlaceHolder("FILE").StringVar(&opts.Nkey)
-	ncli.Flag("tlscert", "TLS public certificate").Envar("STHG_CERT").PlaceHolder("FILE").ExistingFileVar(&opts.TlsCert)
-	ncli.Flag("tlskey", "TLS private key").Envar("STHG_KEY").PlaceHolder("FILE").ExistingFileVar(&opts.TlsKey)
-	ncli.Flag("tlsca", "TLS certificate authority chain").Envar("STHG_CA").PlaceHolder("FILE").ExistingFileVar(&opts.TlsCA)
-	ncli.Flag("timeout", "Time to wait on responses from STHG-MS").Default("5s").Envar("STHG_TIMEOUT").PlaceHolder("DURATION").DurationVar(&opts.Timeout)
+	ncli.Flag("server", "STHG-MS server urls").Short('s').Envar("MS_URL").PlaceHolder("URL").StringVar(&opts.Servers)
+	ncli.Flag("user", "Username or Token").Envar("MS_USER").PlaceHolder("USER").StringVar(&opts.Username)
+	ncli.Flag("password", "Password").Envar("MS_PASSWORD").PlaceHolder("PASSWORD").StringVar(&opts.Password)
+	ncli.Flag("token", "Token").Envar("MS_TOKEN").PlaceHolder("TOKEN").StringVar(&opts.Token)
+	ncli.Flag("connection-name", "Nickname to use for the underlying STHG-MS Connection").Default("STHG-MS CLI Version " + getVersion()).PlaceHolder("NAME").StringVar(&opts.ConnectionName)
+	ncli.Flag("creds", "User credentials").Envar("MS_CREDS").PlaceHolder("FILE").StringVar(&opts.Creds)
+	ncli.Flag("nkey", "User NKEY").Envar("MS_NKEY").PlaceHolder("FILE").StringVar(&opts.Nkey)
+	ncli.Flag("tlscert", "TLS public certificate").Envar("MS_CERT").PlaceHolder("FILE").ExistingFileVar(&opts.TlsCert)
+	ncli.Flag("tlskey", "TLS private key").Envar("MS_KEY").PlaceHolder("FILE").ExistingFileVar(&opts.TlsKey)
+	ncli.Flag("tlsca", "TLS certificate authority chain").Envar("MS_CA").PlaceHolder("FILE").ExistingFileVar(&opts.TlsCA)
+	ncli.Flag("tlsfirst", "Perform TLS handshake before expecting the server greeting").BoolVar(&opts.TlsFirst)
+	if runtime.GOOS == "windows" {
+		ncli.Flag("certstore", "Uses a Windows Certificate Store for TLS (user, machine)").PlaceHolder("TYPE").EnumVar(&opts.WinCertStoreType, "user", "windowscurrentuser", "machine", "windowslocalmachine")
+		ncli.Flag("certstore-match", "Which certificate to use in the store").PlaceHolder("QUERY").StringVar(&opts.WinCertStoreMatch)
+		ncli.Flag("certstore-match-by", "Configures the way certificates are searched for (subject, issuer)").PlaceHolder("MATCH").Default("subject").EnumVar(&opts.WinCertStoreMatchBy, "subject", "issuer")
+		ncli.Flag("certstore-ca-match", "Which certificate authority should be used from the store").StringsVar(&opts.WinCertCaStoreMatch)
+	}
+	ncli.Flag("timeout", "Time to wait on responses from STHG-MS").Default("5s").Envar("MS_TIMEOUT").PlaceHolder("DURATION").DurationVar(&opts.Timeout)
+	ncli.Flag("socks-proxy", "SOCKS5 proxy for connecting to STHG-MS server").Envar("MS_SOCKS_PROXY").PlaceHolder("PROXY").StringVar(&opts.SocksProxy)
 	ncli.Flag("js-api-prefix", "Subject prefix for access to JetStream API").PlaceHolder("PREFIX").StringVar(&opts.JsApiPrefix)
 	ncli.Flag("js-event-prefix", "Subject prefix for access to JetStream Advisories").PlaceHolder("PREFIX").StringVar(&opts.JsEventPrefix)
 	ncli.Flag("js-domain", "JetStream domain to access").PlaceHolder("DOMAIN").StringVar(&opts.JsDomain)
 	ncli.Flag("inbox-prefix", "Custom inbox prefix to use for inboxes").PlaceHolder("PREFIX").StringVar(&opts.InboxPrefix)
 	ncli.Flag("domain", "JetStream domain to access").PlaceHolder("DOMAIN").Hidden().StringVar(&opts.JsDomain)
-	ncli.Flag("context", "Configuration context").Envar("STHG_CONTEXT").Hidden().PlaceHolder("NAME").StringVar(&opts.CfgCtx)
-	ncli.Flag("trace", "Trace API interactions").BoolVar(&opts.Trace)
+	ncli.Flag("colors", "Sets a color scheme to use").PlaceHolder("SCHEME").Envar("MS_COLOR").EnumVar(&opts.ColorScheme, iu.ValidStyles()...)
+	ncli.Flag("context", "Configuration context").Envar("MS_CONTEXT").PlaceHolder("NAME").StringVar(&opts.CfgCtx)
+	ncli.Flag("trace", "Trace API interactions").UnNegatableBoolVar(&opts.Trace)
+	ncli.Flag("no-context", "Disable the selected context").UnNegatableBoolVar(&cli.SkipContexts)
 
 	log.SetFlags(log.Ltime)
+
+	plugins.AddToApp(ncli)
 
 	ncli.MustParseWithUsage(os.Args[1:])
 }

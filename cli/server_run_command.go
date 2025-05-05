@@ -136,10 +136,10 @@ leafnodes {
 func configureServerRunCommand(srv *fisk.CmdClause) {
 	c := &SrvRunCmd{}
 
-	run := srv.Command("run", "Runs a local development NATS server").Hidden().Action(c.runAction)
+	run := srv.Command("run", "Runs a local development STHG-MS server").Hidden().Action(c.runAction)
 	run.Arg("name", "Uses a named context for local access to the server").Default("nats_development").StringVar(&c.config.Name)
-	run.Flag("extend-demo", "Extends the NATS demo network").UnNegatableBoolVar(&c.config.ExtendDemoNetwork)
-	run.Flag("extend", "Extends a NATS network using a context").UnNegatableBoolVar(&c.config.ExtendWithContext)
+	run.Flag("extend-demo", "Extends the ms-client demo network").UnNegatableBoolVar(&c.config.ExtendDemoNetwork)
+	run.Flag("extend", "Extends a STHG-MS network using a context").UnNegatableBoolVar(&c.config.ExtendWithContext)
 	run.Flag("jetstream", "Enables JetStream support").UnNegatableBoolVar(&c.config.JetStream)
 	run.Flag("port", "Sets the local listening port").Default("-1").StringVar(&c.config.Port)
 	run.Flag("monitor", "Enable HTTP based monitoring on a local listening port").IntVar(&c.config.MonitorPort)
@@ -330,7 +330,7 @@ func (c *SrvRunCmd) configureContexts(url string) (string, string, string, error
 			natscontext.WithServerURL(url),
 			natscontext.WithUser("local"),
 			natscontext.WithPassword(c.config.UserPassword),
-			natscontext.WithDescription("Local user access for NATS Development instance"),
+			natscontext.WithDescription("Local user access for STHG-MS Development instance"),
 			natscontext.WithJSDomain(c.config.JSDomain),
 		)
 		err := nctx.Save(nctx.Name)
@@ -345,7 +345,7 @@ func (c *SrvRunCmd) configureContexts(url string) (string, string, string, error
 			natscontext.WithServerURL(url),
 			natscontext.WithUser("service"),
 			natscontext.WithPassword(c.config.ServicePassword),
-			natscontext.WithDescription("Local service access for NATS Development instance"),
+			natscontext.WithDescription("Local service access for STHG-MS Development instance"),
 			natscontext.WithJSDomain(c.config.JSDomain),
 		)
 		err := nctx.Save(svcName)
@@ -360,7 +360,7 @@ func (c *SrvRunCmd) configureContexts(url string) (string, string, string, error
 			natscontext.WithServerURL(url),
 			natscontext.WithUser("system"),
 			natscontext.WithPassword(c.config.SystemPassword),
-			natscontext.WithDescription("System user access for NATS Development instance"),
+			natscontext.WithDescription("System user access for STHG-MS Development instance"),
 		)
 		err := nctx.Save(nctx.Name)
 		if err != nil {
@@ -400,7 +400,7 @@ func (c *SrvRunCmd) runAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	fmt.Printf("Starting local development NATS Server instance: %s\n", c.config.Name)
+	fmt.Printf("Starting local development STHG-MS Server instance: %s\n", c.config.Name)
 	fmt.Println()
 	fmt.Printf("        User Credentials: User: local   Password: %s Context: %s\n", c.config.UserPassword, u)
 	fmt.Printf("     Service Credentials: User: service Password: %s Context: %s\n", c.config.ServicePassword, svc)
@@ -410,9 +410,9 @@ func (c *SrvRunCmd) runAction(_ *fisk.ParseContext) error {
 	}
 	fmt.Printf("  Extending Demo Network: %v\n", c.config.ExtendDemoNetwork)
 	if c.config.ExtendWithContext {
-		fmt.Printf("   Extending Remote NATS: using %s context\n", c.config.Context.Name)
+		fmt.Printf("   Extending Remote STHG-MS: using %s context\n", c.config.Context.Name)
 	} else {
-		fmt.Printf("   Extending Remote NATS: %v\n", c.config.ExtendWithContext)
+		fmt.Printf("   Extending Remote STHG-MS: %v\n", c.config.ExtendWithContext)
 	}
 	fmt.Printf("                     URL: %s\n", srv.ClientURL())
 
@@ -427,7 +427,7 @@ func (c *SrvRunCmd) runAction(_ *fisk.ParseContext) error {
 
 	fmt.Println()
 	fmt.Println()
-	fmt.Println("NOTE: This is not a supported way to run a production NATS Server, view documentation")
+	fmt.Println("NOTE: This is not a supported way to run a production STHG-MS Server, view documentation")
 	fmt.Println("      at https://docs.nats.io/running-a-nats-service/introduction for production use.")
 
 	fmt.Println()

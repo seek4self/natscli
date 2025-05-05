@@ -106,7 +106,7 @@ func generateParagraphPlainText(engine *Engine, stats *Stats, lookupDNS bool, ra
 	inBytesRate := Psize(rawBytes, int64(stats.Rates.InBytesRate))
 	outBytesRate := Psize(rawBytes, int64(stats.Rates.OutBytesRate))
 
-	info := "NATS server version %s (uptime: %s) %s\n"
+	info := "STHG-MS server version %s (uptime: %s) %s\n"
 	info += "Server: %s\n"
 	info += "  ID:   %s\n"
 	info += "  Load: CPU:  %.1f%%  Memory: %s  Slow Consumers: %d\n"
@@ -302,7 +302,7 @@ func generateParagraphCSV(engine *Engine, stats *Stats, delimiter string, lookup
 	inBytesRate := Psize(rawBytes, int64(stats.Rates.InBytesRate))
 	outBytesRate := Psize(rawBytes, int64(stats.Rates.OutBytesRate))
 
-	info := "NATS server version[__DELIM__]%s[__DELIM__](uptime: %s)[__DELIM__]%s\n"
+	info := "STHG-MS server version[__DELIM__]%s[__DELIM__](uptime: %s)[__DELIM__]%s\n"
 	info += "Server:\n"
 	info += "Load:[__DELIM__]CPU:[__DELIM__]%.1f%%[__DELIM__]Memory:[__DELIM__]%s[__DELIM__]Slow Consumers:[__DELIM__]%d\n"
 	info += "In:[__DELIM__]Msgs:[__DELIM__]%s[__DELIM__]Bytes:[__DELIM__]%s[__DELIM__]Msgs/Sec:[__DELIM__]%.1f[__DELIM__]Bytes/Sec:[__DELIM__]%s\n"

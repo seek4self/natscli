@@ -1,33 +1,33 @@
 # Basic steps for setting up decentralized authentication
-All configuration changes are stored locally until `nats auth account push`ed to a nats cluster.
+All configuration changes are stored locally until `ms-client auth account push`ed to a ms-client cluster.
     
 # Create a new operator and set as working context
-nats auth operator add sysopp
+ms-client auth operator add sysopp
 
 # Generate a template server configuration file from an operator
-nats server generate server.conf
+ms-client server generate server.conf
 
 # Create a new account
-nats auth account add MyAccount
+ms-client auth account add MyAccount
 
 # Create a new user in an account
-nats auth user add MyUser
+ms-client auth user add MyUser
 
 # Create an admin user in system account
-nats auth user add admin SYSTEM
+ms-client auth user add admin SYSTEM
 
 # Export credentials for a user
-nats auth user credential sys_admin.cred admin SYSTEM
+ms-client auth user credential sys_admin.cred admin SYSTEM
 
 # Push an account or its changes from a specific operator to a specific server, using system account credentials. 
-nats auth account push MyAccount --server nats://localhost:4222 --operator sysopp --creds sys_admin.cred  
+ms-client auth account push MyAccount --server ms://localhost:4222 --operator sysopp --creds sys_admin.cred  
 
-# Use `nats context` and `nats auth operator select` to set defaults
-nats context add sysadmin --description "System Account" --server nats://localhost:4222 --creds sys_admin.cred
+# Use `ms-client context` and `ms-client auth operator select` to set defaults
+ms-client context add sysadmin --description "System Account" --server ms://localhost:4222 --creds sys_admin.cred
 
-nats auth operator select sysopp
+ms-client auth operator select sysopp
 
 # Push account with default settings
-nats auth account push MyAccount
+ms-client auth account push MyAccount
 
 

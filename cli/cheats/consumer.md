@@ -1,15 +1,15 @@
 # Adding, Removing, Viewing a Consumer
-nats consumer add
-nats consumer info ORDERS NEW
-nats consumer rm ORDERS NEW
+ms-client consumer add
+ms-client consumer info ORDERS NEW
+ms-client consumer rm ORDERS NEW
 
 # Editing a consumer
-nats consumer edit ORDERS NEW --description "new description"
+ms-client consumer edit ORDERS NEW --description "new description"
 
 # Get messages from a consumer
-nats consumer next ORDERS NEW --ack
-nats consumer next ORDERS NEW --no-ack
-nats consumer sub ORDERS NEW --ack
+ms-client consumer next ORDERS NEW --ack
+ms-client consumer next ORDERS NEW --no-ack
+ms-client consumer sub ORDERS NEW --ack
 
 # Force leader election on a consumer
-nats consumer cluster down ORDERS NEW
+ms-client consumer cluster down ORDERS NEW

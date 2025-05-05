@@ -33,10 +33,10 @@ func (c *SrvCheckCmd) exporterAction(_ *fisk.ParseContext) error {
 	http.Handle("/metrics", promhttp.Handler())
 
 	if c.exporterCertificate != "" && c.exporterKey != "" {
-		log.Printf("NATS CLI Prometheus Exporter listening on https://0.0.0.0:%da/metrics", c.exporterPort)
+		log.Printf("STHG-MS CLI Prometheus Exporter listening on https://0.0.0.0:%da/metrics", c.exporterPort)
 		return http.ListenAndServeTLS(fmt.Sprintf(":%d", c.exporterPort), c.exporterCertificate, c.exporterKey, nil)
 	} else {
-		log.Printf("NATS CLI Prometheus Exporter listening on http://0.0.0.0:%d/metrics", c.exporterPort)
+		log.Printf("STHG-MS CLI Prometheus Exporter listening on http://0.0.0.0:%d/metrics", c.exporterPort)
 		return http.ListenAndServe(fmt.Sprintf(":%d", c.exporterPort), nil)
 	}
 }

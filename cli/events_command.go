@@ -59,7 +59,7 @@ func configureEventsCommand(app commandHost) {
 	events.Flag("filter", "Filter across the entire event using regular expressions").Default(".").StringVar(&c.bodyF)
 	events.Flag("js-metric", "Shows JetStream metric events (false)").UnNegatableBoolVar(&c.showJsMetrics)
 	events.Flag("js-advisory", "Shows advisory events (false)").UnNegatableBoolVar(&c.showJsAdvisories)
-	events.Flag("srv-advisory", "Shows NATS Server advisories (true)").Default("true").BoolVar(&c.showServerAdvisories)
+	events.Flag("srv-advisory", "Shows STHG-MS Server advisories (true)").Default("true").BoolVar(&c.showServerAdvisories)
 	events.Flag("subjects", "Show Advisories and Metrics received on specific subjects").PlaceHolder("SUBJECTS").StringsVar(&c.extraSubjects)
 	events.Flag("stream", "Reads events from a Stream only").StringVar(&c.stream)
 	events.Flag("since", "When reading a Stream reads from a certain duration ago").PlaceHolder("DURATION").DurationVar(&c.since)
