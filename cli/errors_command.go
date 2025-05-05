@@ -1,10 +1,23 @@
+// Copyright 2024 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,6 +27,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/nats-io/jsm.go/schemas"
 	"github.com/nats-io/nats-server/v2/server"
+	iu "github.com/nats-io/natscli/internal/util"
 )
 
 type errCmd struct {
@@ -98,7 +112,7 @@ func (c *errCmd) listAction(_ *fisk.ParseContext) error {
 		}
 	})
 
-	table := newTableWriter("NATS Errors")
+	table := iu.NewTableWriter(opts(), "NATS Errors")
 	table.AddHeaders("NATS Code", "HTTP Error Code", "Description", "Comment", "Go Constant")
 	for _, v := range matched {
 		table.AddRow(v.ErrCode, v.Code, v.Description, v.Comment, v.Constant)
@@ -108,10 +122,6 @@ func (c *errCmd) listAction(_ *fisk.ParseContext) error {
 }
 
 func (c *errCmd) editAction(pc *fisk.ParseContext) error {
-	if os.Getenv("EDITOR") == "" {
-		return fmt.Errorf("EDITOR variable is not set")
-	}
-
 	errs, err := c.loadErrors(nil)
 	if err != nil {
 		return err
@@ -140,7 +150,7 @@ func (c *errCmd) editAction(pc *fisk.ParseContext) error {
 	if err != nil {
 		return err
 	}
-	tfile, err := os.CreateTemp("", "")
+	tfile, err := os.CreateTemp("", "*.json")
 	if err != nil {
 		return err
 	}
@@ -148,15 +158,12 @@ func (c *errCmd) editAction(pc *fisk.ParseContext) error {
 	tfile.Write(fj)
 	tfile.Close()
 
-	for {
-		cmd := exec.Command(os.Getenv("EDITOR"), tfile.Name())
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+	fp := tfile.Name()
 
-		err = cmd.Run()
+	for {
+		err = iu.EditFile(fp)
 		if err != nil {
-			return fmt.Errorf("could not edit error: %s", err)
+			return err
 		}
 
 		eb, err := os.ReadFile(tfile.Name())
@@ -194,7 +201,7 @@ func (c *errCmd) editAction(pc *fisk.ParseContext) error {
 		return err
 	}
 
-	err = os.WriteFile(c.file, ej, 0644)
+	err = os.WriteFile(c.file, ej, 0600)
 	if err != nil {
 		return err
 	}
@@ -212,21 +219,20 @@ func (c *errCmd) lookupAction(_ *fisk.ParseContext) error {
 
 	for _, v := range errs {
 		if v.ErrCode == c.code {
-			fmt.Printf("NATS Error Code: %s\n\n", boldf("%d", v.ErrCode))
-			fmt.Printf("        Description: %s\n", v.Description)
-			if v.Comment != "" {
-				fmt.Printf("            Comment: %s\n", v.Comment)
-			}
-			fmt.Printf("          HTTP Code: %d\n", v.Code)
-			fmt.Printf("  Go Index Constant: %s\n", v.Constant)
-			if v.URL != "" {
-				fmt.Printf("           Help URL: %s\n", v.URL)
-			}
+			cols := newColumns(fmt.Sprintf("NATS Error Code: %s", boldf("%d", v.ErrCode)))
+			cols.AddRow("Description", v.Description)
+			cols.AddRowIfNotEmpty("Comment", v.Comment)
+			cols.AddRow("HTTP Code", v.Code)
+			cols.AddRow("Go Index Constant", v.Constant)
+			cols.AddRowIfNotEmpty("Help URL", v.URL)
+
+			cols.Println()
 			if v.Help != "" {
-				fmt.Printf("\n%s\n", v.Help)
+				cols.Println(v.Help)
 			} else {
-				fmt.Printf("\nNo further information available\n")
+				cols.Println("No further information available")
 			}
+			cols.Frender(os.Stdout)
 
 			return nil
 		}
@@ -300,7 +306,7 @@ func (c *errCmd) validateErr(err *server.ErrorsData) error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf(strings.Join(errs, ", "))
+		return errors.New(f(errs))
 	}
 
 	return nil

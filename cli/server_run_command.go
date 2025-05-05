@@ -1,3 +1,16 @@
+// Copyright 2021-2025 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cli
 
 import (
@@ -7,12 +20,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"text/template"
+
+	iu "github.com/nats-io/natscli/internal/util"
 
 	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go/natscontext"
@@ -40,8 +54,8 @@ type SrvRunConfig struct {
 	Verbose              bool
 	Debug                bool
 	StoreDir             string
-	Listen               string
 	Clean                bool
+	MonitorPort          int
 	Context              *natscontext.Context
 }
 
@@ -52,10 +66,12 @@ debug: {{.Debug}}
 trace: {{.Verbose}}
 system_account: SYSTEM
 logtime: false
-
+{{- if .MonitorPort }}
+http_port: {{.MonitorPort}}
+{{- end }}
 {{- if .JetStream }}
 jetstream {
-    store_dir: {{ .StoreDir }}
+    store_dir: "{{ .StoreDir | escape }}"
 {{- if .JSDomain }}
 	domain: {{ .JSDomain }}
 {{- end }}
@@ -107,8 +123,8 @@ leafnodes {
 {{- if .ExtendWithContext }}
         {
             url: "{{.Context.ServerURL}}",
-            {{- if .Context.Creds }}
-            credentials: "{{.Context.Creds}}",
+            {{- if .Context.Creds | escape }}
+            credentials: "{{.Context.Creds | escape }}",
             {{- end }}
             account: "USER"
         }
@@ -126,6 +142,7 @@ func configureServerRunCommand(srv *fisk.CmdClause) {
 	run.Flag("extend", "Extends a NATS network using a context").UnNegatableBoolVar(&c.config.ExtendWithContext)
 	run.Flag("jetstream", "Enables JetStream support").UnNegatableBoolVar(&c.config.JetStream)
 	run.Flag("port", "Sets the local listening port").Default("-1").StringVar(&c.config.Port)
+	run.Flag("monitor", "Enable HTTP based monitoring on a local listening port").IntVar(&c.config.MonitorPort)
 	run.Flag("clean", "Remove contexts after exiting").UnNegatableBoolVar(&c.config.Clean)
 	run.Flag("verbose", "Log in debug mode").UnNegatableBoolVar(&c.config.Debug)
 }
@@ -143,27 +160,9 @@ func (c *SrvRunCmd) getRandomPort() (string, error) {
 	return port, err
 }
 
-func (c *SrvRunCmd) dataParentDir() (string, error) {
-	parent := os.Getenv("XDG_DATA_HOME")
-	if parent != "" {
-		return filepath.Join(parent, ".local", "share"), nil
-	}
-
-	u, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-
-	if u.HomeDir == "" {
-		return "", fmt.Errorf("cannot determine home directory")
-	}
-
-	return filepath.Join(u.HomeDir, ".local", "share"), nil
-}
-
 func (c *SrvRunCmd) validate() error {
 	if c.config.ExtendWithContext {
-		if opts.Config.ServerURL() == "" {
+		if opts().Config.ServerURL() == "" {
 			return fmt.Errorf("extending using a context requires a server url in the context")
 		}
 	}
@@ -177,9 +176,16 @@ func (c *SrvRunCmd) prepareConfig() error {
 		return err
 	}
 
-	c.config.Context = opts.Config
+	if c.config.ExtendWithContext {
+		c.config.Context, err = natscontext.New(c.config.Name, true)
+		if err != nil {
+			return err
+		}
+	} else {
+		c.config.Context = opts().Config
+	}
 
-	if opts.Trace {
+	if opts().Trace {
 		c.config.Verbose = true
 	}
 
@@ -226,7 +232,7 @@ func (c *SrvRunCmd) prepareConfig() error {
 	}
 
 	if c.config.UserPassword == "" {
-		c.config.UserPassword = randomString(32, 32)
+		c.config.UserPassword = iu.RandomString(32, 32)
 	}
 	b, err := bcrypt.GenerateFromPassword([]byte(c.config.UserPassword), 5)
 	if err != nil {
@@ -235,7 +241,7 @@ func (c *SrvRunCmd) prepareConfig() error {
 	c.config.UserPasswordCrypt = string(b)
 
 	if c.config.SystemPassword == "" {
-		c.config.SystemPassword = randomString(32, 32)
+		c.config.SystemPassword = iu.RandomString(32, 32)
 	}
 	b, err = bcrypt.GenerateFromPassword([]byte(c.config.SystemPassword), 5)
 	if err != nil {
@@ -244,7 +250,7 @@ func (c *SrvRunCmd) prepareConfig() error {
 	c.config.SystemPasswordCrypt = string(b)
 
 	if c.config.ServicePassword == "" {
-		c.config.ServicePassword = randomString(32, 32)
+		c.config.ServicePassword = iu.RandomString(32, 32)
 	}
 	b, err = bcrypt.GenerateFromPassword([]byte(c.config.ServicePassword), 5)
 	if err != nil {
@@ -253,15 +259,12 @@ func (c *SrvRunCmd) prepareConfig() error {
 	c.config.ServicePasswordCrypt = string(b)
 
 	if c.config.JetStream {
-		parent, err := c.dataParentDir()
+		parent, err := iu.XdgShareHome()
 		if err != nil {
 			return err
 		}
 		c.config.StoreDir = filepath.Join(parent, "nats", c.config.Name)
-		if runtime.GOOS == "windows" {
-			// escape path separator in file
-			c.config.StoreDir = strings.ReplaceAll(c.config.StoreDir, "\\", "\\\\")
-		}
+
 		if c.config.ExtendWithContext || c.config.ExtendDemoNetwork {
 			c.config.JSDomain = strings.ToUpper(c.config.Name)
 		}
@@ -282,7 +285,17 @@ func (c *SrvRunCmd) writeConfig() (string, error) {
 	}
 	defer tf.Close()
 
-	t, err := template.New("server.cfg").Parse(serverRunConfig)
+	funcs := template.FuncMap{
+		"escape": func(v string) string {
+			if runtime.GOOS == "windows" {
+				return strings.ReplaceAll(v, `\`, "\\\\")
+			}
+
+			return v
+		},
+	}
+
+	t, err := template.New("server.cfg").Funcs(funcs).Parse(serverRunConfig)
 	if err != nil {
 		os.Remove(tf.Name())
 		return "", err

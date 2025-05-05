@@ -1,4 +1,4 @@
-// Copyright 2019-2022 The NATS Authors
+// Copyright 2019-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/nats-io/natscli/cli"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -27,12 +28,14 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/natscli/cli"
+)
 
-	"github.com/nats-io/jsm.go"
+var (
+	rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 func init() {
@@ -50,6 +53,11 @@ func checkErr(t *testing.T, err error, format string, a ...any) {
 
 func runNatsCli(t *testing.T, args ...string) (output []byte) {
 	t.Helper()
+	return runNatsCliWithInput(t, "", args...)
+}
+
+func runNatsCliWithInput(t *testing.T, input string, args ...string) (output []byte) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -61,6 +69,9 @@ func runNatsCli(t *testing.T, args ...string) (output []byte) {
 	}
 
 	execution := exec.CommandContext(ctx, "bash", "-c", cmd)
+	if input != "" {
+		execution.Stdin = strings.NewReader(input)
+	}
 	out, err := execution.CombinedOutput()
 	if err != nil {
 		t.Fatalf("nats utility failed: %v\n%v", err, string(out))
@@ -205,7 +216,7 @@ func TestCLIStreamCreate(t *testing.T) {
 	srv, _, mgr := setupJStreamTest(t)
 	defer srv.Shutdown()
 
-	runNatsCli(t, fmt.Sprintf("--server='%s' str create mem1 --subjects 'js.mem.>,js.other' --storage m --max-msgs-per-subject=10 --max-msgs=-1 --max-age=-1 --max-bytes=-1 --ack --retention limits --max-msg-size=1024 --discard new --dupe-window 1h --replicas 1 --description 'test suite' --allow-rollup --deny-delete --no-deny-purge --allow-direct", srv.ClientURL()))
+	runNatsCli(t, fmt.Sprintf("--server='%s' str create mem1 --subjects 'js.mem.>,js.other' --storage m --max-msgs-per-subject=10 --max-msgs=-1 --max-age=-1 --max-bytes=-1 --ack --retention limits --max-msg-size=1024 --discard new --dupe-window 1h --replicas 1 --description 'test suite' --allow-rollup --deny-delete --no-deny-purge --allow-direct --allow-msg-ttl", srv.ClientURL()))
 	streamShouldExist(t, mgr, "mem1")
 	info := streamInfo(t, mgr, "mem1")
 
@@ -261,6 +272,10 @@ func TestCLIStreamCreate(t *testing.T) {
 		t.Fatalf("expected direct access to be enabled")
 	}
 
+	if !info.Config.AllowMsgTTL {
+		t.Fatalf("expected msg-ttl to be allowed")
+	}
+
 	runNatsCli(t, fmt.Sprintf("--server='%s' str create ORDERS --config testdata/ORDERS_config.json", srv.ClientURL()))
 	streamShouldExist(t, mgr, "ORDERS")
 	info = streamInfo(t, mgr, "ORDERS")
@@ -291,6 +306,10 @@ func TestCLIStreamCreate(t *testing.T) {
 
 	if info.Config.DenyDelete {
 		t.Fatalf("expected delete to be allowed")
+	}
+
+	if !info.Config.AllowMsgTTL {
+		t.Fatalf("expected msg-ttl to be allowed")
 	}
 }
 
@@ -478,7 +497,7 @@ func RandomString(n int) string {
 
 	b := make([]rune, n)
 	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+		b[i] = letterRunes[rng.Intn(len(letterRunes))]
 	}
 	return string(b)
 }
@@ -640,6 +659,36 @@ func TestCLIConsumerNext(t *testing.T) {
 	if strings.TrimSpace(string(out)) != "hello" {
 		t.Fatalf("did not receive 'hello', got: '%s'", string(out))
 	}
+}
+
+func TestCLIStreamAddDefaults(t *testing.T) {
+	srv, _, mgr := setupJStreamTest(t)
+	defer srv.Shutdown()
+
+	runNatsCli(t, fmt.Sprintf("--server='%s' str add file1 --subjects other --defaults", srv.ClientURL()))
+	streamShouldExist(t, mgr, "file1")
+
+	stream, err := mgr.LoadStream("file1")
+	checkErr(t, err, "could not get stream: %v", err)
+
+	if stream.DiscardPolicy() != api.DiscardOld {
+		t.Fatalf("expected old policy")
+	}
+	if stream.Retention() != api.LimitsPolicy {
+		t.Fatalf("expected limits retention")
+	}
+}
+
+func TestCliConsumerAddDefaults(t *testing.T) {
+	srv, _, mgr := setupJStreamTest(t)
+	defer srv.Shutdown()
+
+	_, err := mgr.NewStreamFromDefault("mem1", mem1Stream())
+	checkErr(t, err, "could not create stream: %v", err)
+	streamShouldExist(t, mgr, "mem1")
+
+	runNatsCli(t, fmt.Sprintf("--server='%s' c add mem1 PULL --pull --defaults", srv.ClientURL()))
+	consumerShouldExist(t, mgr, "mem1", "PULL")
 }
 
 func TestCLIStreamEdit(t *testing.T) {

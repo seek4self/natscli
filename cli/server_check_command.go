@@ -1,4 +1,4 @@
-// Copyright 2020-2022 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,21 +14,13 @@
 package cli
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
+	"regexp"
 	"time"
 
 	"github.com/choria-io/fisk"
 	"github.com/nats-io/jsm.go/api"
-	"github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/expfmt"
+	"github.com/nats-io/jsm.go/monitor"
 )
 
 type SrvCheckCmd struct {
@@ -39,64 +31,112 @@ type SrvCheckCmd struct {
 	reqWarning      time.Duration
 	reqCritical     time.Duration
 
-	sourcesStream       string
-	sourcesLagCritical  uint64
-	sourcesSeenCritical time.Duration
-	sourcesMinSources   int
-	sourcesMaxSources   int
-	sourcesMessagesWarn uint64
-	sourcesMessagesCrit uint64
+	sourcesStream            string
+	sourcesLagCritical       uint64
+	sourcesLagCriticalIsSet  bool
+	sourcesSeenCritical      time.Duration
+	sourcesSeenCriticalIsSet bool
+	sourcesMinSources        int
+	sourcesMinSourcesIsSet   bool
+	sourcesMaxSources        int
+	sourcesMaxSourcesIsSet   bool
+	streamMessagesWarn       uint64
+	streamMessagesWarnIsSet  bool
+	streamMessagesCrit       uint64
+	streamMessagesCritIsSet  bool
+	subjectsWarn             int
+	subjectsWarnIsSet        bool
+	subjectsCrit             int
+	subjectsCritIsSet        bool
 
-	raftExpect       int
-	raftLagCritical  uint64
-	raftSeenCritical time.Duration
+	consumerName                        string
+	consumerAckOutstandingCritical      int
+	consumerAckOutstandingCriticalIsSet bool
+	consumerWaitingCritical             int
+	consumerWaitingCriticalIsSet        bool
+	consumerUnprocessedCritical         int
+	consumerUnprocessedCriticalIsSet    bool
+	consumerLastDeliveryCritical        time.Duration
+	consumerLastDeliveryCriticalIsSet   bool
+	consumerLastAckCritical             time.Duration
+	consumerLastAckCriticalIsSet        bool
+	consumerRedeliveryCritical          int
+	consumerRedeliveryCriticalIsSet     bool
+	consumerPinned                      bool
 
-	jsMemWarn           int
-	jsMemCritical       int
-	jsStoreWarn         int
-	jsStoreCritical     int
-	jsStreamsWarn       int
-	jsStreamsCritical   int
-	jsConsumersWarn     int
-	jsConsumersCritical int
+	raftExpect            int
+	raftExpectIsSet       bool
+	raftLagCritical       uint64
+	raftLagCriticalIsSet  bool
+	raftSeenCritical      time.Duration
+	raftSeenCriticalIsSet bool
 
-	srvName        string
-	srvCPUWarn     int
-	srvCPUCrit     int
-	srvMemWarn     int
-	srvMemCrit     int
-	srvConnWarn    int
-	srvConnCrit    int
-	srvSubsWarn    int
-	srvSubCrit     int
-	srvUptimeWarn  time.Duration
-	srvUptimeCrit  time.Duration
-	srvAuthRequire bool
-	srvTLSRequired bool
-	srvJSRequired  bool
-	srvURL         *url.URL
+	jsMemWarn             int
+	jsMemCritical         int
+	jsStoreWarn           int
+	jsStoreCritical       int
+	jsStreamsWarn         int
+	jsStreamsCritical     int
+	jsConsumersWarn       int
+	jsConsumersCritical   int
+	jsReplicas            bool
+	jsReplicaSeenCritical time.Duration
+	jsReplicaLagCritical  uint64
 
-	kvBucket     string
-	kvValuesCrit int
-	kvValuesWarn int
-	kvKey        string
+	srvName         string
+	srvCPUWarn      int
+	srvCPUCrit      int
+	srvMemWarn      int
+	srvMemCrit      int
+	srvConnWarn     int
+	srvConnCrit     int
+	srvSubsWarn     int
+	srvSubCrit      int
+	srvUptimeWarn   time.Duration
+	srvUptimeCrit   time.Duration
+	srvAuthRequired bool
+	srvTLSRequired  bool
+	srvJSRequired   bool
+
+	msgSubject      string
+	msgAgeWarn      time.Duration
+	msgAgeCrit      time.Duration
+	msgRegexp       *regexp.Regexp
+	msgBodyAsTs     bool
+	msgHeaders      map[string]string
+	msgHeadersMatch map[string]string
+	msgPayload      string
+	msgCrit         time.Duration
+	msgWarn         time.Duration
+
+	kvBucket                 string
+	kvValuesCrit             int64
+	kvValuesWarn             int64
+	kvKey                    string
+	credentialValidityCrit   time.Duration
+	credentialValidityWarn   time.Duration
+	credentialRequiresExpire bool
+	credential               string
+
+	exporterConfigFile  string
+	exporterPort        int
+	exporterCertificate string
+	exporterKey         string
 }
 
 func configureServerCheckCommand(srv *fisk.CmdClause) {
-	c := &SrvCheckCmd{}
+	c := &SrvCheckCmd{
+		msgHeaders:      make(map[string]string),
+		msgHeadersMatch: make(map[string]string),
+	}
 
-	help := `Health check for NATS servers
-
-   connection  - connects and does a request-reply check
-   stream      - checks JetStream streams for source, mirror and cluster health
-   meta        - JetStream Meta Cluster health
-`
-	check := srv.Command("check", help)
-	check.Flag("format", "Render the check in a specific format (nagios, json, prometheus, text)").Default("nagios").EnumVar(&checkRenderFormat, "nagios", "json", "prometheus", "text")
-	check.Flag("namespace", "The prometheus namespace to use in output").Default(opts.PrometheusNamespace).StringVar(&opts.PrometheusNamespace)
+	check := srv.Command("check", "Health check for NATS servers")
+	check.Flag("format", "Render the check in a specific format (nagios, json, prometheus, text)").Default("nagios").EnumVar(&checkRenderFormatText, "nagios", "json", "prometheus", "text")
+	check.Flag("namespace", "The prometheus namespace to use in output").Default(opts().PrometheusNamespace).StringVar(&opts().PrometheusNamespace)
 	check.Flag("outfile", "Save output to a file rather than STDOUT").StringVar(&checkRenderOutFile)
+	check.PreAction(c.parseRenderFormat)
 
-	conn := check.Command("connection", "Checks basic server connection").Alias("conn").Default().Action(c.checkConnection)
+	conn := check.Command("connection", "Checks basic server connection").Alias("conn").Action(c.checkConnection)
 	conn.Flag("connect-warn", "Warning threshold to allow for establishing connections").Default("500ms").PlaceHolder("DURATION").DurationVar(&c.connectWarning)
 	conn.Flag("connect-critical", "Critical threshold to allow for establishing connections").Default("1s").PlaceHolder("DURATION").DurationVar(&c.connectCritical)
 	conn.Flag("rtt-warn", "Warning threshold to allow for server RTT").Default("500ms").PlaceHolder("DURATION").DurationVar(&c.rttWarning)
@@ -105,21 +145,61 @@ func configureServerCheckCommand(srv *fisk.CmdClause) {
 	conn.Flag("req-critical", "Critical threshold to allow for full round trip test").PlaceHolder("DURATION").Default("1s").DurationVar(&c.reqCritical)
 
 	stream := check.Command("stream", "Checks the health of mirrored streams, streams with sources or clustered streams").Action(c.checkStream)
+	stream.HelpLong(`These settings can be set using Stream Metadata in the following form:
+
+	io.nats.monitor.lag-critical: 200
+
+When set these settings will be used, but can be overridden using --lag-critical.`)
 	stream.Flag("stream", "The streams to check").Required().StringVar(&c.sourcesStream)
-	stream.Flag("lag-critical", "Critical threshold to allow for lag on any source or mirror").PlaceHolder("MSGS").Uint64Var(&c.sourcesLagCritical)
-	stream.Flag("seen-critical", "Critical threshold for how long ago the source or mirror should have been seen").PlaceHolder("DURATION").DurationVar(&c.sourcesSeenCritical)
-	stream.Flag("min-sources", "Minimum number of sources to expect").PlaceHolder("SOURCES").Default("1").IntVar(&c.sourcesMinSources)
-	stream.Flag("max-sources", "Maximum number of sources to expect").PlaceHolder("SOURCES").Default("1").IntVar(&c.sourcesMaxSources)
-	stream.Flag("peer-expect", "Number of cluster replicas to expect").Required().PlaceHolder("SERVERS").IntVar(&c.raftExpect)
-	stream.Flag("peer-lag-critical", "Critical threshold to allow for cluster peer lag").PlaceHolder("OPS").Uint64Var(&c.raftLagCritical)
-	stream.Flag("peer-seen-critical", "Critical threshold for how long ago a cluster peer should have been seen").PlaceHolder("DURATION").Default("10s").DurationVar(&c.raftSeenCritical)
-	stream.Flag("msgs-warn", "Warn if there are fewer than this many messages in the stream").PlaceHolder("MSGS").Uint64Var(&c.sourcesMessagesWarn)
-	stream.Flag("msgs-critical", "Critical if there are fewer than this many messages in the stream").PlaceHolder("MSGS").Uint64Var(&c.sourcesMessagesCrit)
+	stream.Flag("lag-critical", "Critical threshold to allow for lag on any source or mirror").PlaceHolder("MSGS").IsSetByUser(&c.sourcesLagCriticalIsSet).Uint64Var(&c.sourcesLagCritical)
+	stream.Flag("seen-critical", "Critical threshold for how long ago the source or mirror should have been seen").PlaceHolder("DURATION").IsSetByUser(&c.sourcesSeenCriticalIsSet).DurationVar(&c.sourcesSeenCritical)
+	stream.Flag("min-sources", "Minimum number of sources to expect").PlaceHolder("SOURCES").Default("1").IsSetByUser(&c.sourcesMinSourcesIsSet).IntVar(&c.sourcesMinSources)
+	stream.Flag("max-sources", "Maximum number of sources to expect").PlaceHolder("SOURCES").Default("1").IsSetByUser(&c.sourcesMaxSourcesIsSet).IntVar(&c.sourcesMaxSources)
+	stream.Flag("peer-expect", "Number of cluster replicas to expect").Default("1").PlaceHolder("SERVERS").IsSetByUser(&c.raftExpectIsSet).IntVar(&c.raftExpect)
+	stream.Flag("peer-lag-critical", "Critical threshold to allow for cluster peer lag").PlaceHolder("OPS").IsSetByUser(&c.raftLagCriticalIsSet).Uint64Var(&c.raftLagCritical)
+	stream.Flag("peer-seen-critical", "Critical threshold for how long ago a cluster peer should have been seen").PlaceHolder("DURATION").IsSetByUser(&c.raftSeenCriticalIsSet).Default("10s").DurationVar(&c.raftSeenCritical)
+	stream.Flag("msgs-warn", "Warn if there are fewer than this many messages in the stream").PlaceHolder("MSGS").IsSetByUser(&c.streamMessagesWarnIsSet).Uint64Var(&c.streamMessagesWarn)
+	stream.Flag("msgs-critical", "Critical if there are fewer than this many messages in the stream").PlaceHolder("MSGS").IsSetByUser(&c.streamMessagesCritIsSet).Uint64Var(&c.streamMessagesCrit)
+	stream.Flag("subjects-warn", "Critical threshold for subjects in the stream").PlaceHolder("SUBJECTS").Default("-1").IsSetByUser(&c.subjectsWarnIsSet).IntVar(&c.subjectsWarn)
+	stream.Flag("subjects-critical", "Warning threshold for subjects in the stream").PlaceHolder("SUBJECTS").Default("-1").IsSetByUser(&c.subjectsCritIsSet).IntVar(&c.subjectsCrit)
+
+	consumer := check.Command("consumer", "Checks the health of a consumer").Action(c.checkConsumer)
+	consumer.HelpLong(`These settings can be set using Consumer Metadata in the following form:
+
+	io.nats.monitor.waiting-critical: 20
+
+When set these settings will be used, but can be overridden using --waiting-critical.`)
+	consumer.Flag("stream", "The streams to check").Required().StringVar(&c.sourcesStream)
+	consumer.Flag("consumer", "The consumer to check").Required().StringVar(&c.consumerName)
+	consumer.Flag("outstanding-ack-critical", "Maximum number of outstanding acks to allow").Default("-1").IsSetByUser(&c.consumerAckOutstandingCriticalIsSet).IntVar(&c.consumerAckOutstandingCritical)
+	consumer.Flag("waiting-critical", "Maximum number of waiting pulls to allow").Default("-1").IsSetByUser(&c.consumerWaitingCriticalIsSet).IntVar(&c.consumerWaitingCritical)
+	consumer.Flag("unprocessed-critical", "Maximum number of unprocessed messages to allow").Default("-1").IsSetByUser(&c.consumerUnprocessedCriticalIsSet).IntVar(&c.consumerUnprocessedCritical)
+	consumer.Flag("last-delivery-critical", "Time to allow since the last delivery").Default("0s").IsSetByUser(&c.consumerLastDeliveryCriticalIsSet).DurationVar(&c.consumerLastDeliveryCritical)
+	consumer.Flag("last-ack-critical", "Time to allow since the last ack").Default("0s").IsSetByUser(&c.consumerLastAckCriticalIsSet).DurationVar(&c.consumerLastAckCritical)
+	consumer.Flag("redelivery-critical", "Maximum number of redeliveries to allow").Default("-1").IsSetByUser(&c.consumerRedeliveryCriticalIsSet).IntVar(&c.consumerRedeliveryCritical)
+	consumer.Flag("pinned", "Requires Pinned Client priority with all groups having a pinned client").UnNegatableBoolVar(&c.consumerPinned)
+
+	msg := check.Command("message", "Checks properties of a message stored in a stream").Action(c.checkMsg)
+	msg.Flag("stream", "The streams to check").Required().StringVar(&c.sourcesStream)
+	msg.Flag("subject", "The subject to fetch a message from").Default(">").StringVar(&c.msgSubject)
+	msg.Flag("age-warn", "Warning threshold for message age as a duration").PlaceHolder("DURATION").DurationVar(&c.msgAgeWarn)
+	msg.Flag("age-critical", "Critical threshold for message age as a duration").PlaceHolder("DURATION").DurationVar(&c.msgAgeCrit)
+	msg.Flag("content", "Regular expression to check the content against").PlaceHolder("REGEX").Default(".").RegexpVar(&c.msgRegexp)
+	msg.Flag("body-timestamp", "Use message body as a unix timestamp instead of message metadata").UnNegatableBoolVar(&c.msgBodyAsTs)
 
 	meta := check.Command("meta", "Check JetStream cluster state").Alias("raft").Action(c.checkRaft)
 	meta.Flag("expect", "Number of servers to expect").Required().PlaceHolder("SERVERS").IntVar(&c.raftExpect)
 	meta.Flag("lag-critical", "Critical threshold to allow for lag").PlaceHolder("OPS").Required().Uint64Var(&c.raftLagCritical)
 	meta.Flag("seen-critical", "Critical threshold for how long ago a peer should have been seen").Required().PlaceHolder("DURATION").DurationVar(&c.raftSeenCritical)
+
+	req := check.Command("request", "Checks a request-reply service").Alias("req").Action(c.checkRequest)
+	req.Flag("subject", "The subject to send the request to").Required().StringVar(&c.msgSubject)
+	req.Flag("payload", "Payload to send in the request").StringVar(&c.msgPayload)
+	req.Flag("headers", "Headers to publish in the request").StringMapVar(&c.msgHeaders)
+	req.Flag("match-payload", "Regular expression the response should match").RegexpVar(&c.msgRegexp)
+	req.Flag("match-headers", "Headers to publish in the request").StringMapVar(&c.msgHeaders)
+	req.Flag("response-critical", "Critical threshold for response time").DurationVar(&c.msgCrit)
+	req.Flag("response-warn", "Warning threshold for response time").DurationVar(&c.msgWarn)
 
 	js := check.Command("jetstream", "Check JetStream account state").Alias("js").Action(c.checkJS)
 	js.Flag("mem-warn", "Warning threshold for memory storage, in percent").Default("75").IntVar(&c.jsMemWarn)
@@ -130,6 +210,9 @@ func configureServerCheckCommand(srv *fisk.CmdClause) {
 	js.Flag("streams-critical", "Critical threshold for number of streams used, in percent").Default("-1").IntVar(&c.jsStreamsCritical)
 	js.Flag("consumers-warn", "Warning threshold for number of consumers used, in percent").Default("-1").IntVar(&c.jsConsumersWarn)
 	js.Flag("consumers-critical", "Critical threshold for number of consumers used, in percent").Default("-1").IntVar(&c.jsConsumersCritical)
+	js.Flag("replicas", "Checks if all streams have healthy replicas").Default("true").BoolVar(&c.jsReplicas)
+	js.Flag("replica-seen-critical", "Critical threshold for when a stream replica should have been seen, as a duration").Default("5s").DurationVar(&c.jsReplicaSeenCritical)
+	js.Flag("replica-lag-critical", "Critical threshold for how many operations behind a peer can be").Default("200").Uint64Var(&c.jsReplicaLagCritical)
 
 	serv := check.Command("server", "Checks a NATS Server health").Action(c.checkSrv)
 	serv.Flag("name", "Server name to require in the result").Required().StringVar(&c.srvName)
@@ -143,945 +226,367 @@ func configureServerCheckCommand(srv *fisk.CmdClause) {
 	serv.Flag("subs-critical", "Critical threshold for number of active subscriptions, supports inversion").IntVar(&c.srvSubCrit)
 	serv.Flag("uptime-warn", "Warning threshold for server uptime as duration").DurationVar(&c.srvUptimeWarn)
 	serv.Flag("uptime-critical", "Critical threshold for server uptime as duration").DurationVar(&c.srvUptimeCrit)
-	serv.Flag("auth-required", "Checks that authentication is enabled").UnNegatableBoolVar(&c.srvAuthRequire)
+	serv.Flag("auth-required", "Checks that authentication is enabled").UnNegatableBoolVar(&c.srvAuthRequired)
 	serv.Flag("tls-required", "Checks that TLS is required").UnNegatableBoolVar(&c.srvTLSRequired)
 	serv.Flag("js-required", "Checks that JetStream is enabled").UnNegatableBoolVar(&c.srvJSRequired)
 
 	kv := check.Command("kv", "Checks a NATS KV Bucket").Action(c.checkKV)
 	kv.Flag("bucket", "Checks a specific bucket").Required().StringVar(&c.kvBucket)
-	kv.Flag("values-critical", "Critical threshold for number of values in the bucket").Default("-1").IntVar(&c.kvValuesCrit)
-	kv.Flag("values-warn", "Warning threshold for number of values in the bucket").Default("-1").IntVar(&c.kvValuesWarn)
+	kv.Flag("values-critical", "Critical threshold for number of values in the bucket").Default("-1").Int64Var(&c.kvValuesCrit)
+	kv.Flag("values-warn", "Warning threshold for number of values in the bucket").Default("-1").Int64Var(&c.kvValuesWarn)
 	kv.Flag("key", "Requires a key to have any non-delete value set").StringVar(&c.kvKey)
-}
 
-type checkStatus string
+	cred := check.Command("credential", "Checks the validity of a NATS credential file").Action(c.checkCredentialAction)
+	cred.Flag("credential", "The file holding the NATS credential").Required().StringVar(&c.credential)
+	cred.Flag("validity-warn", "Warning threshold for time before expiry").DurationVar(&c.credentialValidityWarn)
+	cred.Flag("validity-critical", "Critical threshold for time before expiry").DurationVar(&c.credentialValidityCrit)
+	cred.Flag("require-expiry", "Requires the credential to have expiry set").Default("true").BoolVar(&c.credentialRequiresExpire)
+
+	exporter := check.Command("exporter", "Prometheus exporter for server checks").Hidden().Action(c.exporterAction)
+	exporter.Flag("config", "Exporter configuration").Required().ExistingFileVar(&c.exporterConfigFile)
+	exporter.Flag("port", "Port to listen on").Default("8080").IntVar(&c.exporterPort)
+	exporter.Flag("https-key", "Key for HTTPS").ExistingFileVar(&c.exporterKey)
+	exporter.Flag("https-certificate", "Certificate for HTTPS").ExistingFileVar(&c.exporterCertificate)
+}
 
 var (
-	checkRenderFormat              = "nagios"
-	checkRenderOutFile             = ""
-	okCheckStatus      checkStatus = "OK"
-	warnCheckStatus    checkStatus = "WARNING"
-	critCheckStatus    checkStatus = "CRITICAL"
-	unknownCheckStatus checkStatus = "UNKNOWN"
+	checkRenderFormatText = "nagios"
+	checkRenderFormat     = monitor.NagiosFormat
+	checkRenderOutFile    = ""
 )
 
-type result struct {
-	Output    string      `json:"output,omitempty"`
-	Status    checkStatus `json:"status"`
-	Check     string      `json:"check_suite"`
-	Name      string      `json:"check_name"`
-	Warnings  []string    `json:"warning,omitempty"`
-	Criticals []string    `json:"critical,omitempty"`
-	OKs       []string    `json:"ok,omitempty"`
-	PerfData  perfData    `json:"perf_data"`
-}
-
-func (r *result) pd(pd ...*perfDataItem) {
-	r.PerfData = append(r.PerfData, pd...)
-}
-
-func (r *result) criticalExit(format string, a ...any) {
-	r.critical(format, a...)
-	r.GenericExit()
-}
-
-func (r *result) critical(format string, a ...any) {
-	r.Criticals = append(r.Criticals, fmt.Sprintf(format, a...))
-}
-
-func (r *result) warn(format string, a ...any) {
-	r.Warnings = append(r.Warnings, fmt.Sprintf(format, a...))
-}
-
-func (r *result) ok(format string, a ...any) {
-	r.OKs = append(r.OKs, fmt.Sprintf(format, a...))
-}
-
-func (r *result) criticalIfErr(err error, format string, a ...any) bool {
-	if err == nil {
-		return false
-	}
-
-	r.criticalExit(format, a...)
-
-	return true
-}
-
-func (r *result) exitCode() int {
-	if checkRenderFormat == "prometheus" {
-		return 0
-	}
-
-	switch r.Status {
-	case okCheckStatus:
-		return 0
-	case warnCheckStatus:
-		return 1
-	case critCheckStatus:
-		return 2
-	default:
-		return 3
-	}
-}
-
-func (r *result) Exit() {
-	os.Exit(r.exitCode())
-}
-
-func (r *result) renderHuman() string {
-	buf := bytes.NewBuffer([]byte{})
-
-	fmt.Fprintf(buf, "%s: %s\n\n", r.Name, r.Status)
-
-	table := newTableWriter("")
-	table.AddHeaders("Status", "Message")
-	lines := 0
-	for _, ok := range r.OKs {
-		table.AddRow("OK", ok)
-		lines++
-	}
-	for _, warn := range r.Warnings {
-		table.AddRow("Warning", warn)
-		lines++
-	}
-	for _, crit := range r.Criticals {
-		table.AddRow("Critical", crit)
-		lines++
-	}
-
-	if lines > 0 {
-		fmt.Fprintln(buf, "Status Detail")
-		fmt.Fprintln(buf)
-		fmt.Fprint(buf, table.Render())
-		fmt.Fprintln(buf)
-	}
-
-	table = newTableWriter("")
-	table.AddHeaders("Metric", "Value", "Unit", "Critical Threshold", "Warning Threshold")
-	lines = 0
-	for _, pd := range r.PerfData {
-		table.AddRow(pd.Name, pd.Value, pd.Unit, pd.Crit, pd.Warn)
-		lines++
-	}
-	if lines > 0 {
-		fmt.Fprintln(buf, "Check Metrics")
-		fmt.Fprintln(buf)
-		fmt.Fprint(buf, table.Render())
-		fmt.Fprintln(buf)
-	}
-
-	return buf.String()
-}
-
-func (r *result) renderPrometheus() string {
-	if r.Check == "" {
-		r.Check = r.Name
-	}
-
-	if opts.PrometheusNamespace == "" {
-		opts.PrometheusNamespace = "nats_server_check"
-	}
-
-	registry := prometheus.NewRegistry()
-	prometheus.DefaultRegisterer = registry
-	prometheus.DefaultGatherer = registry
-
-	sname := strings.ReplaceAll(r.Name, `"`, `.`)
-	for _, pd := range r.PerfData {
-		help := fmt.Sprintf("Data about the NATS CLI check %s", r.Check)
-		if pd.Help != "" {
-			help = pd.Help
-		}
-
-		gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: prometheus.BuildFQName(opts.PrometheusNamespace, r.Check, pd.Name),
-			Help: help,
-		}, []string{"item"})
-		prometheus.MustRegister(gauge)
-		gauge.WithLabelValues(sname).Set(pd.Value)
-	}
-
-	status := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: fmt.Sprintf("nats_server_check_%s_status_code", r.Check),
-		Help: fmt.Sprintf("Nagios compatible status code for %s", r.Check),
-	}, []string{"item", "status"})
-	prometheus.MustRegister(status)
-
-	status.WithLabelValues(sname, string(r.Status)).Set(float64(r.exitCode()))
-
-	var buf bytes.Buffer
-
-	mfs, err := prometheus.DefaultGatherer.Gather()
-	if err != nil {
-		panic(err)
-	}
-
-	for _, mf := range mfs {
-		_, err = expfmt.MetricFamilyToText(&buf, mf)
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	return buf.String()
-}
-
-func (r *result) renderJSON() string {
-	res, _ := json.MarshalIndent(r, "", "  ")
-	return string(res)
-}
-
-func (r *result) renderNagios() string {
-	res := []string{r.Name}
-	for _, c := range r.Criticals {
-		res = append(res, fmt.Sprintf("Crit:%s", c))
-	}
-
-	for _, w := range r.Warnings {
-		res = append(res, fmt.Sprintf("Warn:%s", w))
-	}
-
-	if r.Output != "" {
-		res = append(res, r.Output)
-	} else if len(r.OKs) > 0 {
-		for _, ok := range r.OKs {
-			res = append(res, fmt.Sprintf("OK:%s", ok))
-		}
-	}
-
-	if len(r.PerfData) == 0 {
-		return fmt.Sprintf("%s %s", r.Status, strings.Join(res, " "))
-	} else {
-		return fmt.Sprintf("%s %s | %s", r.Status, strings.Join(res, " "), r.PerfData)
-	}
-}
-
-func (r *result) String() string {
-	if r.Status == "" {
-		r.Status = unknownCheckStatus
-	}
-	if r.PerfData == nil {
-		r.PerfData = perfData{}
-	}
-
-	switch {
-	case len(r.Criticals) > 0:
-		r.Status = critCheckStatus
-	case len(r.Warnings) > 0:
-		r.Status = warnCheckStatus
-	default:
-		r.Status = okCheckStatus
-	}
-
-	switch checkRenderFormat {
-	case "json":
-		return r.renderJSON()
+func (c *SrvCheckCmd) parseRenderFormat(_ *fisk.ParseContext) error {
+	switch checkRenderFormatText {
 	case "prometheus":
-		return r.renderPrometheus()
+		checkRenderFormat = monitor.PrometheusFormat
 	case "text":
-		return r.renderHuman()
-	default:
-		return r.renderNagios()
+		checkRenderFormat = monitor.TextFormat
+	case "json":
+		checkRenderFormat = monitor.JSONFormat
 	}
+
+	return nil
 }
 
-func (r *result) GenericExit() {
-	if checkRenderOutFile != "" {
-		f, err := os.CreateTemp(filepath.Dir(checkRenderOutFile), "")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "temp file failed: %s", err)
-			os.Exit(1)
-		}
-		defer os.Remove(f.Name())
+func (c *SrvCheckCmd) checkRequest(_ *fisk.ParseContext) error {
+	check := &monitor.Result{Name: c.msgSubject, Check: "request", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
+	defer check.GenericExit()
 
-		_, err = fmt.Fprintln(f, r.String())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "temp file write failed: %s", err)
-			os.Exit(1)
-		}
-
-		err = f.Close()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "temp file write failed: %s", err)
-			os.Exit(1)
-		}
-
-		err = os.Chmod(f.Name(), 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "temp file mode change failed: %s", err)
-			os.Exit(1)
-		}
-
-		err = os.Rename(f.Name(), checkRenderOutFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "temp file rename failed: %s", err)
-		}
-
-		os.Exit(1)
+	checkOpts := monitor.CheckRequestOptions{
+		Subject:              c.msgSubject,
+		Payload:              c.msgPayload,
+		Header:               c.msgHeaders,
+		HeaderMatch:          c.msgHeadersMatch,
+		ResponseTimeWarn:     c.msgWarn.Seconds(),
+		ResponseTimeCritical: c.msgCrit.Seconds(),
 	}
 
-	fmt.Println(r.String())
+	if c.msgRegexp != nil {
+		checkOpts.ResponseMatch = c.msgRegexp.String()
+	}
 
-	r.Exit()
+	var err error
+	nc := opts().Conn
+
+	if nc == nil {
+		err = monitor.CheckRequest(opts().Config.ServerURL(), natsOpts(), check, opts().Timeout, checkOpts)
+	} else {
+		err = monitor.CheckRequestWithConnection(nc, check, opts().Timeout, checkOpts)
+	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
+
+	return nil
 }
 
-type perfDataItem struct {
-	Help  string  `json:"-"`
-	Name  string  `json:"name"`
-	Value float64 `json:"value"`
-	Warn  float64 `json:"warning"`
-	Crit  float64 `json:"critical"`
-	Unit  string  `json:"unit,omitempty"`
-}
+func (c *SrvCheckCmd) checkConsumer(_ *fisk.ParseContext) error {
+	check := &monitor.Result{Name: fmt.Sprintf("%s_%s", c.sourcesStream, c.consumerName), Check: "consumer", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
+	defer check.GenericExit()
 
-type perfData []*perfDataItem
-
-func (p perfData) String() string {
-	res := []string{}
-	for _, i := range p {
-		res = append(res, i.String())
+	checkOpts := monitor.CheckConsumerHealthOptions{
+		StreamName:   c.sourcesStream,
+		ConsumerName: c.consumerName,
+		Pinned:       c.consumerPinned,
 	}
 
-	return strings.TrimSpace(strings.Join(res, " "))
-}
-
-func (i *perfDataItem) String() string {
-	valueFmt := "%0.0f"
-	if i.Unit == "s" {
-		valueFmt = "%0.4f"
+	if c.consumerAckOutstandingCriticalIsSet {
+		checkOpts.AckOutstandingCritical = c.consumerAckOutstandingCritical
+	}
+	if c.consumerWaitingCriticalIsSet {
+		checkOpts.WaitingCritical = c.consumerWaitingCritical
+	}
+	if c.consumerUnprocessedCriticalIsSet {
+		checkOpts.UnprocessedCritical = c.consumerUnprocessedCritical
+	}
+	if c.consumerLastDeliveryCriticalIsSet {
+		checkOpts.LastDeliveryCritical = c.consumerLastDeliveryCritical.Seconds()
+	}
+	if c.consumerLastAckCriticalIsSet {
+		checkOpts.LastAckCritical = c.consumerLastAckCritical.Seconds()
+	}
+	if c.consumerRedeliveryCriticalIsSet {
+		checkOpts.RedeliveryCritical = c.consumerRedeliveryCritical
 	}
 
-	pd := fmt.Sprintf("%s="+valueFmt, i.Name, i.Value)
-	if i.Unit != "" {
-		pd = pd + i.Unit
+	logger := api.NewDiscardLogger()
+	if opts().Trace {
+		logger = api.NewDefaultLogger(api.TraceLevel)
 	}
 
-	if i.Warn > 0 || i.Crit > 0 {
-		if i.Warn != 0 {
-			pd = fmt.Sprintf("%s;"+valueFmt, pd, i.Warn)
-		} else if i.Crit > 0 {
-			pd = fmt.Sprintf("%s;", pd)
-		}
+	var err error
+	mgr := opts().Mgr
 
-		if i.Crit != 0 {
-			pd = fmt.Sprintf("%s;"+valueFmt, pd, i.Crit)
-		}
+	if mgr == nil {
+		err = monitor.CheckConsumerHealth(opts().Config.ServerURL(), natsOpts(), jsmOpts(), check, checkOpts, logger)
+	} else {
+		err = monitor.CheckConsumerHealthWithConnection(mgr, check, checkOpts, logger)
 	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
-	return pd
-}
-
-func (c *SrvCheckCmd) checkKVStatusAndBucket(check *result, nc *nats.Conn) {
-	js, err := nc.JetStream()
-	check.criticalIfErr(err, "connection failed: %v", err)
-
-	kv, err := js.KeyValue(c.kvBucket)
-	if err == nats.ErrBucketNotFound {
-		check.critical("bucket %v not found", c.kvBucket)
-		return
-	} else if err != nil {
-		check.critical("could not load bucket: %v", err)
-		return
-	}
-
-	check.ok("bucket %s", c.kvBucket)
-
-	status, err := kv.Status()
-	check.criticalIfErr(err, "could not obtain bucket status: %v", err)
-
-	check.pd(
-		&perfDataItem{Name: "values", Value: float64(status.Values()), Warn: float64(c.kvValuesWarn), Crit: float64(c.kvValuesCrit), Help: "How many values are stored in the bucket"},
-	)
-
-	if c.kvKey != "" {
-		v, err := kv.Get(c.kvKey)
-		if err == nats.ErrKeyNotFound {
-			check.critical("key %s not found", c.kvKey)
-		} else if err != nil {
-			check.critical("key %s not loaded: %v", c.kvKey, err)
-		} else {
-			switch v.Operation() {
-			case nats.KeyValueDelete:
-				check.critical("key %v is deleted", c.kvKey)
-			case nats.KeyValuePurge:
-				check.critical("key %v is purged", c.kvKey)
-			default:
-				check.ok("key %s found", c.kvKey)
-			}
-		}
-	}
-
-	if c.kvValuesWarn > -1 || c.kvValuesCrit > -1 {
-		if c.kvValuesCrit < c.kvValuesWarn {
-			if c.kvValuesCrit > -1 && status.Values() <= uint64(c.kvValuesCrit) {
-				check.critical("%d values", status.Values())
-			} else if c.kvValuesWarn > -1 && status.Values() <= uint64(c.kvValuesWarn) {
-				check.warn("%d values", status.Values())
-			} else {
-				check.ok("%d values", status.Values())
-			}
-		} else {
-			if c.kvValuesCrit > -1 && status.Values() >= uint64(c.kvValuesCrit) {
-				check.critical("%d values", status.Values())
-			} else if c.kvValuesWarn > -1 && status.Values() >= uint64(c.kvValuesWarn) {
-				check.warn("%d values", status.Values())
-			} else {
-				check.ok("%d values", status.Values())
-			}
-		}
-	}
-
-	if status.BackingStore() == "JetStream" {
-		nfo := status.(*nats.KeyValueBucketStatus).StreamInfo()
-		check.pd(
-			&perfDataItem{Name: "bytes", Value: float64(nfo.State.Bytes), Unit: "B", Help: "Bytes stored in the bucket"},
-			&perfDataItem{Name: "replicas", Value: float64(nfo.Config.Replicas)},
-		)
-	}
+	return nil
 }
 
 func (c *SrvCheckCmd) checkKV(_ *fisk.ParseContext) error {
-	check := &result{Name: c.kvBucket, Check: "kv"}
+	check := &monitor.Result{Name: c.kvBucket, Check: "kv", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	nc, _, err := prepareHelper("", natsOpts()...)
-	check.criticalIfErr(err, "connection failed: %s", err)
+	checkOpts := monitor.CheckKVBucketAndKeyOptions{
+		Bucket:         c.kvBucket,
+		Key:            c.kvKey,
+		ValuesCritical: c.kvValuesCrit,
+		ValuesWarning:  c.kvValuesWarn,
+	}
 
-	c.checkKVStatusAndBucket(check, nc)
+	var err error
+	nc := opts().Conn
+
+	if nc == nil {
+		err = monitor.CheckKVBucketAndKey(opts().Config.ServerURL(), natsOpts(), check, checkOpts)
+	} else {
+		err = monitor.CheckKVBucketAndKeyWithConnection(nc, check, checkOpts)
+	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }
 
 func (c *SrvCheckCmd) checkSrv(_ *fisk.ParseContext) error {
-	check := &result{Name: c.srvName, Check: "server"}
+	check := &monitor.Result{Name: c.srvName, Check: "server", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	vz, err := c.fetchVarz()
-	check.criticalIfErr(err, "could not retrieve VARZ information: %s", err)
-
-	err = c.checkVarz(check, vz)
-	check.criticalIfErr(err, "check failed: %s", err)
-
-	return nil
-}
-
-func (c *SrvCheckCmd) checkVarz(check *result, vz *server.Varz) error {
-	if vz == nil {
-		return fmt.Errorf("no data received")
+	checkOpts := monitor.CheckServerOptions{
+		Name:                   c.srvName,
+		CPUWarning:             c.srvCPUWarn,
+		CPUCritical:            c.srvCPUCrit,
+		MemoryWarning:          c.srvMemWarn,
+		MemoryCritical:         c.srvMemCrit,
+		ConnectionsWarning:     c.srvConnWarn,
+		ConnectionsCritical:    c.srvConnCrit,
+		SubscriptionsWarning:   c.srvSubsWarn,
+		SubscriptionsCritical:  c.srvSubCrit,
+		UptimeWarning:          c.srvUptimeWarn.Seconds(),
+		UptimeCritical:         c.srvUptimeCrit.Seconds(),
+		AuthenticationRequired: c.srvAuthRequired,
+		TLSRequired:            c.srvTLSRequired,
+		JetStreamRequired:      c.srvJSRequired,
 	}
 
-	if vz.Name != c.srvName {
-		return fmt.Errorf("result from %s", vz.Name)
-	}
+	var err error
+	nc := opts().Conn
 
-	if c.srvJSRequired {
-		if vz.JetStream.Config == nil {
-			check.critical("JetStream not enabled")
-		} else {
-			check.ok("JetStream enabled")
-		}
-	}
-
-	if c.srvTLSRequired {
-		if vz.TLSRequired {
-			check.ok("TLS required")
-		} else {
-			check.critical("TLS not required")
-		}
-	}
-
-	if c.srvAuthRequire {
-		if vz.AuthRequired {
-			check.ok("Authentication required")
-		} else {
-			check.critical("Authentication not required")
-		}
-	}
-
-	up := vz.Now.Sub(vz.Start)
-	if c.srvUptimeWarn > 0 || c.srvUptimeCrit > 0 {
-		if c.srvUptimeCrit > c.srvUptimeWarn {
-			check.critical("Up invalid thresholds")
-			return nil
-		}
-
-		if up <= c.srvUptimeCrit {
-			check.critical("Up %s", humanizeDuration(up))
-		} else if up <= c.srvUptimeWarn {
-			check.warn("Up %s", humanizeDuration(up))
-		} else {
-			check.ok("Up %s", humanizeDuration(up))
-		}
-	}
-
-	check.pd(
-		&perfDataItem{Name: "uptime", Value: up.Seconds(), Warn: c.srvUptimeWarn.Seconds(), Crit: c.srvUptimeCrit.Seconds(), Unit: "s", Help: "NATS Server uptime in seconds"},
-		&perfDataItem{Name: "cpu", Value: vz.CPU, Warn: float64(c.srvCPUWarn), Crit: float64(c.srvCPUCrit), Unit: "%", Help: "NATS Server CPU usage in percentage"},
-		&perfDataItem{Name: "mem", Value: float64(vz.Mem), Warn: float64(c.srvMemWarn), Crit: float64(c.srvMemCrit), Help: "NATS Server memory usage in bytes"},
-		&perfDataItem{Name: "connections", Value: float64(vz.Connections), Warn: float64(c.srvConnWarn), Crit: float64(c.srvConnCrit), Help: "Active connections"},
-		&perfDataItem{Name: "subscriptions", Value: float64(vz.Subscriptions), Warn: float64(c.srvSubsWarn), Crit: float64(c.srvSubCrit), Help: "Active subscriptions"},
-	)
-
-	checkVal := func(name string, crit float64, warn float64, value float64, r bool) {
-		if crit == 0 && warn == 0 {
-			return
-		}
-
-		if !r && crit < warn {
-			check.critical("%s invalid thresholds", name)
-			return
-		}
-
-		if r && crit < warn {
-			if value <= crit {
-				check.critical("%s %.2f", name, value)
-			} else if value <= warn {
-				check.warn("%s %.2f", name, value)
-			} else {
-				check.ok("%s %.2f", name, value)
-			}
-		} else {
-			if value >= crit {
-				check.critical("%s %.2f", name, value)
-			} else if value >= warn {
-				check.warn("%s %.2f", name, value)
-			} else {
-				check.ok("%s %.2f", name, value)
-			}
-		}
-	}
-
-	checkVal("CPU", float64(c.srvCPUCrit), float64(c.srvCPUWarn), vz.CPU, false)
-	checkVal("Memory", float64(c.srvMemCrit), float64(c.srvMemWarn), float64(vz.Mem), false)
-	checkVal("Connections", float64(c.srvConnCrit), float64(c.srvConnWarn), float64(vz.Connections), true)
-	checkVal("Subscriptions", float64(c.srvSubCrit), float64(c.srvSubsWarn), float64(vz.Subscriptions), true)
-
-	return nil
-}
-
-func (c *SrvCheckCmd) fetchVarz() (*server.Varz, error) {
-	var vz json.RawMessage
-
-	if c.srvURL == nil {
-		nc, _, err := prepareHelper("", natsOpts()...)
-		if err != nil {
-			return nil, err
-		}
-
-		if c.srvName == "" {
-			return nil, fmt.Errorf("server name is required")
-		}
-
-		res, err := doReq(server.VarzEventOptions{EventFilterOptions: server.EventFilterOptions{Name: c.srvName}}, "$SYS.REQ.SERVER.PING.VARZ", 1, nc)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(res) != 1 {
-			return nil, fmt.Errorf("received %d responses for %s", len(res), c.srvName)
-		}
-
-		reqresp := map[string]json.RawMessage{}
-		err = json.Unmarshal(res[0], &reqresp)
-		if err != nil {
-			return nil, err
-		}
-
-		errresp, ok := reqresp["error"]
-		if ok {
-			return nil, fmt.Errorf("invalid response received: %#v", errresp)
-		}
-
-		vz = reqresp["data"]
+	if nc == nil {
+		err = monitor.CheckServer(opts().Config.ServerURL(), natsOpts(), check, opts().Timeout, checkOpts)
 	} else {
-		return nil, fmt.Errorf("not implemented")
+		err = monitor.CheckServerWithConnection(nc, check, opts().Timeout, checkOpts)
 	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
-	if len(vz) == 0 {
-		return nil, fmt.Errorf("no data received for %s", c.srvName)
-	}
-
-	varz := &server.Varz{}
-	err := json.Unmarshal(vz, varz)
-	if err != nil {
-		return nil, err
-	}
-
-	return varz, nil
+	return nil
 }
 
 func (c *SrvCheckCmd) checkJS(_ *fisk.ParseContext) error {
-	check := &result{Name: "JetStream", Check: "jetstream"}
+	check := &monitor.Result{Name: "JetStream", Check: "jetstream", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	check.criticalIfErr(err, "connection failed: %s", err)
-
-	info, err := mgr.JetStreamAccountInfo()
-	check.criticalIfErr(err, "JetStream not available: %s", err)
-
-	err = c.checkAccountInfo(check, info)
-	check.criticalIfErr(err, "JetStream not available: %s", err)
-
-	return nil
-}
-
-func (c *SrvCheckCmd) checkAccountInfo(check *result, info *api.JetStreamAccountStats) error {
-	if info == nil {
-		return fmt.Errorf("invalid account status")
+	checkOpts := monitor.CheckJetStreamAccountOptions{
+		MemoryWarning:       c.jsMemWarn,
+		MemoryCritical:      c.jsMemCritical,
+		FileWarning:         c.jsStoreWarn,
+		FileCritical:        c.jsStoreCritical,
+		StreamWarning:       c.jsStreamsWarn,
+		StreamCritical:      c.jsStreamsCritical,
+		ConsumersWarning:    c.jsConsumersWarn,
+		ConsumersCritical:   c.jsConsumersCritical,
+		CheckReplicas:       c.jsReplicas,
+		ReplicaSeenCritical: c.jsReplicaSeenCritical.Seconds(),
+		ReplicaLagCritical:  c.jsReplicaLagCritical,
 	}
 
-	checkVal := func(item string, unit string, warn int, crit int, max int64, current uint64) {
-		pct := 0
-		if max > 0 {
-			pct = int(float64(current) / float64(max) * 100)
-		}
+	var err error
+	mgr := opts().Mgr
 
-		check.pd(&perfDataItem{Name: item, Value: float64(current), Unit: unit, Help: fmt.Sprintf("JetStream %s resource usage", item)})
-		check.pd(&perfDataItem{
-			Name:  fmt.Sprintf("%s_pct", item),
-			Value: float64(pct),
-			Unit:  "%",
-			Warn:  float64(warn),
-			Crit:  float64(crit),
-			Help:  fmt.Sprintf("JetStream %s resource usage in percent", item),
-		})
-
-		if warn != -1 && crit != -1 && warn >= crit {
-			check.critical("%s: invalid thresholds", item)
-			return
-		}
-
-		if pct > 100 {
-			check.critical("%s: exceed server limits", item)
-			return
-		}
-
-		if warn >= 0 && crit >= 0 {
-			switch {
-			case pct > crit:
-				check.critical("%d%% %s", pct, item)
-			case pct > warn:
-				check.warn("%d%% %s", pct, item)
-			}
-		}
+	if mgr == nil {
+		err = monitor.CheckJetStreamAccount(opts().Config.ServerURL(), natsOpts(), jsmOpts(), check, checkOpts)
+	} else {
+		err = monitor.CheckJetStreamAccountWithConnection(mgr, check, checkOpts)
 	}
-
-	checkVal("memory", "B", c.jsMemWarn, c.jsMemCritical, info.Limits.MaxMemory, info.Memory)
-	checkVal("storage", "B", c.jsStoreWarn, c.jsStoreCritical, info.Limits.MaxStore, info.Store)
-	checkVal("streams", "", c.jsStreamsWarn, c.jsStreamsCritical, int64(info.Limits.MaxStreams), uint64(info.Streams))
-	checkVal("consumers", "", c.jsConsumersWarn, c.jsConsumersCritical, int64(info.Limits.MaxConsumers), uint64(info.Consumers))
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }
 
 func (c *SrvCheckCmd) checkRaft(_ *fisk.ParseContext) error {
-	check := &result{Name: "JetStream Meta Cluster", Check: "meta"}
+	check := &monitor.Result{Name: "JetStream Meta Cluster", Check: "meta", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	nc, _, err := prepareHelper("", natsOpts()...)
-	check.criticalIfErr(err, "connection failed: %s", err)
-
-	res, err := doReq(&server.JSzOptions{LeaderOnly: true}, "$SYS.REQ.SERVER.PING.JSZ", 1, nc)
-	check.criticalIfErr(err, "JSZ API request failed: %s", err)
-
-	if len(res) != 1 {
-		check.criticalExit(fmt.Sprintf("JSZ API request returned %d results", len(res)))
-		return nil
+	checkOpts := monitor.CheckJetstreamMetaOptions{
+		ExpectServers: c.raftExpect,
+		LagCritical:   c.raftLagCritical,
+		SeenCritical:  c.raftSeenCritical.Seconds(),
 	}
 
-	type jszr struct {
-		Data   server.JSInfo     `json:"data"`
-		Server server.ServerInfo `json:"server"`
+	var err error
+	nc := opts().Conn
+
+	if nc == nil {
+		err = monitor.CheckJetstreamMeta(opts().Config.ServerURL(), natsOpts(), check, checkOpts)
+	} else {
+		err = monitor.CheckJetstreamMetaWithConnection(nc, check, checkOpts)
 	}
-
-	// works around 2.7.0 breaking chances
-	type jszrCompact struct {
-		Data struct {
-			Streams   int    `json:"total_streams,omitempty"`
-			Consumers int    `json:"total_consumers,omitempty"`
-			Messages  uint64 `json:"total_messages,omitempty"`
-			Bytes     uint64 `json:"total_message_bytes,omitempty"`
-		} `json:"data"`
-	}
-
-	jszresp := &jszr{}
-	err = json.Unmarshal(res[0], jszresp)
-	check.criticalIfErr(err, "invalid result received: %s", err)
-
-	// we may have a pre 2.7.0 machine and will try get data with old struct names, if all of these are
-	// 0 it might be that they are 0 or that we had data in the old format, so we try parse the old
-	// and set what is in there.  If it's not an old server 0s will stay 0s, otherwise we pull in old format values
-	if jszresp.Data.Streams == 0 && jszresp.Data.Consumers == 0 && jszresp.Data.Messages == 0 && jszresp.Data.Bytes == 0 {
-		cresp := jszrCompact{}
-		if json.Unmarshal(res[0], &cresp) == nil {
-			jszresp.Data.Streams = cresp.Data.Streams
-			jszresp.Data.Consumers = cresp.Data.Consumers
-			jszresp.Data.Messages = cresp.Data.Messages
-			jszresp.Data.Bytes = cresp.Data.Bytes
-		}
-	}
-
-	err = c.checkMetaClusterInfo(check, jszresp.Data.Meta)
-	check.criticalIfErr(err, "invalid result received: %s", err)
-
-	if len(check.Criticals) == 0 && len(check.Warnings) == 0 {
-		check.ok("%d peers led by %s", len(jszresp.Data.Meta.Replicas)+1, jszresp.Data.Meta.Leader)
-	}
-
-	return nil
-}
-
-func (c *SrvCheckCmd) checkMetaClusterInfo(check *result, ci *server.MetaClusterInfo) error {
-	return c.checkClusterInfo(check, &server.ClusterInfo{
-		Name:     ci.Name,
-		Leader:   ci.Leader,
-		Replicas: ci.Replicas,
-	})
-}
-
-func (c *SrvCheckCmd) checkClusterInfo(check *result, ci *server.ClusterInfo) error {
-	if ci == nil {
-		check.critical("no cluster information")
-		return nil
-	}
-
-	if ci.Leader == "" {
-		check.critical("No leader")
-		return nil
-	}
-
-	check.pd(&perfDataItem{
-		Name:  "peers",
-		Value: float64(len(ci.Replicas) + 1),
-		Warn:  float64(c.raftExpect),
-		Crit:  float64(c.raftExpect),
-		Help:  "Configured RAFT peers",
-	})
-
-	if len(ci.Replicas)+1 != c.raftExpect {
-		check.critical("%d peers of expected %d", len(ci.Replicas)+1, c.raftExpect)
-	}
-
-	notCurrent := 0
-	inactive := 0
-	offline := 0
-	lagged := 0
-	for _, peer := range ci.Replicas {
-		if !peer.Current {
-			notCurrent++
-		}
-		if peer.Offline {
-			offline++
-		}
-		if peer.Active > c.raftSeenCritical {
-			inactive++
-		}
-		if peer.Lag > c.raftLagCritical {
-			lagged++
-		}
-	}
-
-	check.pd(
-		&perfDataItem{Name: "peer_offline", Value: float64(offline), Help: "Offline RAFT peers"},
-		&perfDataItem{Name: "peer_not_current", Value: float64(notCurrent), Help: "RAFT peers that are not current"},
-		&perfDataItem{Name: "peer_inactive", Value: float64(inactive), Help: "Inactive RAFT peers"},
-		&perfDataItem{Name: "peer_lagged", Value: float64(lagged), Help: "RAFT peers that are lagged more than configured threshold"},
-	)
-
-	if notCurrent > 0 {
-		check.critical("%d not current", notCurrent)
-	}
-	if inactive > 0 {
-		check.critical("%d inactive more than %s", inactive, c.raftSeenCritical)
-	}
-	if offline > 0 {
-		check.critical("%d offline", offline)
-	}
-	if lagged > 0 {
-		check.critical("%d lagged more than %d ops", lagged, c.raftLagCritical)
-	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }
 
 func (c *SrvCheckCmd) checkStream(_ *fisk.ParseContext) error {
-	check := &result{Name: c.sourcesStream, Check: "stream"}
+	check := &monitor.Result{Name: c.sourcesStream, Check: "stream", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	_, mgr, err := prepareHelper("", natsOpts()...)
-	check.criticalIfErr(err, "connection failed: %s", err)
-
-	stream, err := mgr.LoadStream(c.sourcesStream)
-	check.criticalIfErr(err, "could not load stream %s: %s", c.sourcesStream, err)
-
-	info, err := stream.LatestInformation()
-	check.criticalIfErr(err, "could not load stream %s info: %s", c.sourcesStream, err)
-
-	if info.Cluster != nil {
-		var sci server.ClusterInfo
-		cij, _ := json.Marshal(info.Cluster)
-		json.Unmarshal(cij, &sci)
-		err = c.checkClusterInfo(check, &sci)
-		check.criticalIfErr(err, "Invalid cluster data: %s", err)
-
-		if len(check.Criticals) == 0 {
-			check.ok("%d current replicas", len(info.Cluster.Replicas)+1)
-		}
-	} else if c.raftExpect > 0 {
-		check.critical("not clustered expected %d peers", c.raftExpect)
+	checkOpts := monitor.CheckStreamHealthOptions{
+		StreamName: c.sourcesStream,
 	}
 
-	check.pd(&perfDataItem{Name: "messages", Value: float64(info.State.Msgs), Warn: float64(c.sourcesMessagesWarn), Crit: float64(c.sourcesMessagesCrit), Help: "Messages stored in the stream"})
-	if c.sourcesMessagesWarn > 0 && info.State.Msgs <= c.sourcesMessagesWarn {
-		check.warn("%d messages", info.State.Msgs)
+	if c.sourcesLagCriticalIsSet {
+		checkOpts.SourcesLagCritical = c.sourcesLagCritical
 	}
-	if c.sourcesMessagesCrit > 0 && info.State.Msgs <= c.sourcesMessagesCrit {
-		check.critical("%d messages", info.State.Msgs)
+	if c.sourcesSeenCriticalIsSet {
+		checkOpts.SourcesSeenCritical = c.sourcesSeenCritical.Seconds()
+	}
+	if c.sourcesMinSourcesIsSet {
+		checkOpts.MinSources = c.sourcesMinSources
+	}
+	if c.sourcesMaxSourcesIsSet {
+		checkOpts.MaxSources = c.sourcesMaxSources
+	}
+	if c.raftExpectIsSet {
+		checkOpts.ClusterExpectedPeers = c.raftExpect
+	}
+	if c.raftLagCriticalIsSet {
+		checkOpts.ClusterLagCritical = c.raftLagCritical
+	}
+	if c.raftSeenCriticalIsSet {
+		checkOpts.ClusterSeenCritical = c.raftSeenCritical.Seconds()
+	}
+	if c.streamMessagesWarnIsSet {
+		checkOpts.MessagesWarn = c.streamMessagesWarn
+	}
+	if c.streamMessagesCritIsSet {
+		checkOpts.MessagesCrit = c.streamMessagesCrit
+	}
+	if c.subjectsWarnIsSet {
+		checkOpts.SubjectsWarn = c.subjectsWarn
+	}
+	if c.subjectsCritIsSet {
+		checkOpts.SubjectsCrit = c.subjectsCrit
 	}
 
-	switch {
-	case stream.IsMirror():
-		err = c.checkMirror(check, info)
-		check.criticalIfErr(err, "Invalid mirror data: %s", err)
-
-		if len(check.Criticals) == 0 {
-			check.ok("%s mirror of %s is %d lagged, last seen %s ago", c.sourcesStream, info.Mirror.Name, info.Mirror.Lag, info.Mirror.Active.Round(time.Millisecond))
-		}
-
-	case stream.IsSourced():
-		err = c.checkSources(check, info)
-		check.criticalIfErr(err, "Invalid source data: %s", err)
-
-		if len(check.Criticals) == 0 {
-			check.ok("%d sources", len(info.Sources))
-		}
+	logger := api.NewDiscardLogger()
+	if opts().Trace {
+		logger = api.NewDefaultLogger(api.TraceLevel)
 	}
+
+	var err error
+	mgr := opts().Mgr
+
+	if mgr == nil {
+		err = monitor.CheckStreamHealth(opts().Config.ServerURL(), natsOpts(), jsmOpts(), check, checkOpts, logger)
+	} else {
+		err = monitor.CheckStreamHealthWithConnection(mgr, check, checkOpts, logger)
+	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }
 
-func (c *SrvCheckCmd) checkMirror(check *result, info *api.StreamInfo) error {
-	if info.Mirror == nil {
-		check.critical("not mirrored")
-		return nil
+func (c *SrvCheckCmd) checkMsg(_ *fisk.ParseContext) error {
+	check := &monitor.Result{Name: "Stream Message", Check: "message", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
+	defer check.GenericExit()
+
+	checkOpts := monitor.CheckStreamMessageOptions{
+		StreamName:      c.sourcesStream,
+		Subject:         c.msgSubject,
+		AgeWarning:      c.msgAgeWarn.Seconds(),
+		AgeCritical:     c.msgAgeCrit.Seconds(),
+		Content:         c.msgRegexp.String(),
+		BodyAsTimestamp: c.msgBodyAsTs,
 	}
 
-	check.pd(
-		&perfDataItem{Name: "lag", Crit: float64(c.sourcesLagCritical), Value: float64(info.Mirror.Lag), Help: "Number of operations this peer is behind its origin"},
-		&perfDataItem{Name: "active", Crit: c.sourcesSeenCritical.Seconds(), Unit: "s", Value: info.Mirror.Active.Seconds(), Help: "Indicates if this peer is active and catching up if lagged"},
-	)
+	var err error
+	mgr := opts().Mgr
 
-	if c.sourcesLagCritical > 0 && info.Mirror.Lag > c.sourcesLagCritical {
-		check.critical("%d messages behind", info.Mirror.Lag)
+	if mgr == nil {
+		err = monitor.CheckStreamMessage(opts().Config.ServerURL(), natsOpts(), jsmOpts(), check, checkOpts)
+	} else {
+		err = monitor.CheckStreamMessageWithConnection(mgr, check, checkOpts)
 	}
-
-	if c.sourcesSeenCritical > 0 && info.Mirror.Active > c.sourcesSeenCritical {
-		check.critical("last active %s", info.Mirror.Active)
-	}
-
-	return nil
-}
-
-func (c *SrvCheckCmd) checkSources(check *result, info *api.StreamInfo) error {
-	check.pd(&perfDataItem{Name: "sources", Value: float64(len(info.Sources)), Warn: float64(c.sourcesMinSources), Crit: float64(c.sourcesMaxSources), Help: "Number of sources being consumed by this stream"})
-
-	if len(info.Sources) == 0 {
-		check.critical("no sources defined")
-	}
-
-	lagged := 0
-	inactive := 0
-
-	for _, s := range info.Sources {
-		if c.sourcesLagCritical > 0 && s.Lag > c.sourcesLagCritical {
-			lagged++
-		}
-
-		if c.sourcesSeenCritical > 0 && s.Active > c.sourcesSeenCritical {
-			inactive++
-		}
-	}
-
-	check.pd(
-		&perfDataItem{Name: "sources_lagged", Value: float64(lagged), Help: "Number of sources that are behind more than the configured threshold"},
-		&perfDataItem{Name: "sources_inactive", Value: float64(inactive), Help: "Number of sources that are inactive"},
-	)
-
-	if lagged > 0 {
-		check.critical("%d lagged sources", lagged)
-	}
-	if inactive > 0 {
-		check.critical("%d inactive sources", inactive)
-	}
-	if len(info.Sources) < c.sourcesMinSources {
-		check.critical("%d sources of min expected %d", len(info.Sources), c.sourcesMinSources)
-	}
-	if len(info.Sources) > c.sourcesMaxSources {
-		check.critical("%d sources of max expected %d", len(info.Sources), c.sourcesMaxSources)
-	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }
 
 func (c *SrvCheckCmd) checkConnection(_ *fisk.ParseContext) error {
-	check := &result{Name: "Connection", Check: "connections"}
+	check := &monitor.Result{Name: "Connection", Check: "connections", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
 	defer check.GenericExit()
 
-	connStart := time.Now()
-	nc, _, err := prepareHelper("", natsOpts()...)
-	check.criticalIfErr(err, "connection failed")
+	if opts().Config == nil {
+		err := loadContext(false)
+		if check.CriticalIfErr(err, "loading context failed: %v", err) {
+			return nil
+		}
+	}
 
-	ct := time.Since(connStart)
-	check.pd(&perfDataItem{Name: "connect_time", Value: ct.Seconds(), Warn: c.connectWarning.Seconds(), Crit: c.connectCritical.Seconds(), Unit: "s", Help: "Time taken to connect to NATS"})
+	checkOpts := monitor.CheckConnectionOptions{
+		ConnectTimeWarning:  c.connectWarning.Seconds(),
+		ConnectTimeCritical: c.connectCritical.Seconds(),
+		ServerRttWarning:    c.rttWarning.Seconds(),
+		ServerRttCritical:   c.rttCritical.Seconds(),
+		RequestRttWarning:   c.reqWarning.Seconds(),
+		RequestRttCritical:  c.reqCritical.Seconds(),
+	}
 
-	if ct >= c.connectCritical {
-		check.critical("connected to %s, connect time exceeded %v", nc.ConnectedUrl(), c.connectCritical)
-	} else if ct >= c.connectWarning {
-		check.warn("connected to %s, connect time exceeded %v", nc.ConnectedUrl(), c.connectWarning)
+	var err error
+	nc := opts().Conn
+
+	if nc == nil {
+		err = monitor.CheckConnection(opts().Config.ServerURL(), natsOpts(), opts().Timeout, check, checkOpts)
 	} else {
-		check.ok("connected to %s in %s", nc.ConnectedUrl(), ct)
+		err = fmt.Errorf("connection checks are not supported when a connection is supplied")
 	}
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
-	rtt, err := nc.RTT()
-	check.criticalIfErr(err, "rtt failed: %s", err)
+	return nil
+}
 
-	check.pd(&perfDataItem{Name: "rtt", Value: rtt.Seconds(), Warn: c.rttWarning.Seconds(), Crit: c.rttCritical.Seconds(), Unit: "s", Help: "The round-trip-time of the connection"})
-	if rtt >= c.rttCritical {
-		check.critical("rtt time exceeded %v", c.rttCritical)
-	} else if rtt >= c.rttWarning {
-		check.critical("rtt time exceeded %v", c.rttWarning)
-	} else {
-		check.ok("rtt time %v", rtt)
-	}
+func (c *SrvCheckCmd) checkCredentialAction(_ *fisk.ParseContext) error {
+	check := &monitor.Result{Name: "Credential", Check: "credential", OutFile: checkRenderOutFile, NameSpace: opts().PrometheusNamespace, RenderFormat: checkRenderFormat, Trace: opts().Trace}
+	defer check.GenericExit()
 
-	msg := []byte(randomPassword(100))
-	ib := nc.NewRespInbox()
-	sub, err := nc.SubscribeSync(ib)
-	check.criticalIfErr(err, "could not subscribe to %s: %s", ib, err)
-	sub.AutoUnsubscribe(1)
-
-	start := time.Now()
-	err = nc.Publish(ib, msg)
-	check.criticalIfErr(err, "could not publish to %s: %s", ib, err)
-
-	received, err := sub.NextMsg(opts.Timeout)
-	check.criticalIfErr(err, "did not receive from %s: %s", ib, err)
-
-	reqt := time.Since(start)
-	check.pd(&perfDataItem{Name: "request_time", Value: reqt.Seconds(), Warn: c.reqWarning.Seconds(), Crit: c.reqCritical.Seconds(), Unit: "s", Help: "Time taken for a full Request-Reply operation"})
-
-	if !bytes.Equal(received.Data, msg) {
-		check.critical("did not receive expected message")
-	}
-
-	if reqt >= c.reqCritical {
-		check.critical("round trip request took %f", reqt.Seconds())
-	} else if reqt >= c.reqWarning {
-		check.warn("round trip request took %f", reqt.Seconds())
-	} else {
-		check.ok("round trip took %fs", reqt.Seconds())
-	}
+	err := monitor.CheckCredential(check, monitor.CheckCredentialOptions{
+		File:             c.credential,
+		ValidityWarning:  c.credentialValidityWarn.Seconds(),
+		ValidityCritical: c.credentialValidityCrit.Seconds(),
+		RequiresExpiry:   c.credentialRequiresExpire,
+	})
+	check.CriticalIfErr(err, "Check failed: %v", err)
 
 	return nil
 }

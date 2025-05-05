@@ -8,17 +8,20 @@ and support full JetStream management.
 ### Features
 
 * JetStream management
+* Key-Value management
+* Object Store management
+* Service API management
 * JetStream data and configuration backup
 * Message publish and subscribe
 * Service requests and creation
 * Benchmarking and Latency testing
-* Super Cluster observation
+* Deep system account inspection and reporting
 * Configuration context maintenance
-* NATS eco system schema registry
+* NATS eco-system schema registry
 
 ### Installation
 
-Releases are [published to GitHub](https://github.com/nats-io/natscli/releases/) where zip, rpm and debs for various
+Releases are [published to GitHub](https://github.com/nats-io/natscli/releases/) where Zip, RPMs and DEBs for various
 operating systems can be found.
 
 #### Installation via go install
@@ -36,13 +39,19 @@ To install a specific release:
 go install github.com/nats-io/natscli/nats@v0.0.33
 ```
 
-#### OS X installation via Homebrew
+#### macOS installation via Homebrew
 
-For OS X `brew` can be used to install the latest version:
+For macOS `brew` can be used to install the latest released version:
 
 ```nohighlight
 brew tap nats-io/nats-tools
 brew install nats-io/nats-tools/nats
+```
+#### Windows installation via scoop
+On Windows, [scoop](https://scoop.sh) has the latest released version:
+```
+scoop bucket add extras
+scoop install extras/natscli
 ```
 
 #### Arch Linux installation via yay
@@ -51,6 +60,14 @@ For Arch users there is an [AUR package](https://aur.archlinux.org/packages/nats
 
 ```
 yay natscli
+```
+
+#### Installation from the shell
+
+The following script will install the latest released version of the nats cli on Linux and macOS:
+
+```nohighlight
+curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
 ```
 
 #### Nightly docker images
@@ -64,7 +81,7 @@ To enable this we'll create a `demo` configuration and set it as default.
 
 First we add a configuration to capture the default `localhost` configuration.
 ```
-nats context add local --description "Localhost"
+nats context add localhost --description "Localhost"
 ```
 Output
 ```
@@ -100,6 +117,19 @@ Known contexts:
 ```
 
 The context is selected as default, use `nats context --help` to see how to add, remove and edit contexts.
+
+To switch to another context we can use:
+```
+nats ctx select localhost
+```
+To switch context back to previous one, we can use `context previous` subcommand:
+```
+nats ctx -- -
+```
+
+### Configuration file
+
+nats-cli stores contextes in `~/.config/nats/context`. Those contextes are stored as JSON documents. You can find the description and expected value for this configuration file by running `nats --help` and look for the global flags.
 
 ### JetStream management
 
@@ -138,7 +168,7 @@ Output
 Next we publish 5 messages with a counter and timestamp in the format `message 5 @ 2020-12-03T12:33:18+01:00`:
 
 ```
-nats pub cli.demo "message {{.Count}} @ {{.TimeStamp}}" --count=10 
+nats pub cli.demo "message {{.Count}} @ {{.TimeStamp}}" --count=5
 ```
 Output
 ```
@@ -187,7 +217,7 @@ hello headers
 ### match requests and replies
 We can print matching replay-requests together
 ```
-sub --match-replies subject.name
+nats sub --match-replies cli.demo
 ```
 Output
 ```
@@ -242,7 +272,7 @@ Output
 In another shell we can send a request to this service:
 
 ```
-nats request cli.weather.london 
+nats request "cli.weather.london" '' 
 ```
 Output
 ```
@@ -277,6 +307,67 @@ newyork: ☀️ +2°C
 Now the `nats` CLI parses the subject, extracts the `{london,newyork}` from the subjects and calls `curl`, replacing
 `{{2}}` with the body of the 2nd subject token - `{london,newyork}`.
 
+## Translating message data using a converter command
+
+Additional to the raw output of messages using `nats sub` and `nats stream view` you can also translate the message data by running it through a command. 
+
+The command receives the message data as raw bytes through stdin and the output of the command will be the shown output for the message. There is the additional possibility to add the filter subject by using `{{Subject}}` as part of the arguments for the tranlation command.
+
+#### Examples for using the translation feature:
+
+Here we use the [jq](https://github.com/stedolan/jq) tool to format our json message payload into a more readable format:
+
+We subscribe to a subject that will receive json data.
+```
+nats sub --translate 'jq .' cli.json
+```
+Now we publish some example data.
+```
+nats pub cli.json '{"task":"demo","duration":60}'
+```
+
+The Output will show the message formatted.
+```
+23:54:35 Subscribing on cli.json
+[#1] Received on "cli.json"
+{
+  "task": "demo",
+  "duration": 60
+}
+```
+
+Another example is creating hex dumps from any message to avoid terminal corruption.
+
+By changing the subscription into:
+
+```
+nats sub --translate 'xxd' cli.json
+```
+
+We will get the following output for the same published msg:
+```
+00:02:56 Subscribing on cli.json
+[#1] Received on "cli.json"
+00000000: 7b22 7461 736b 223a 2264 656d 6f22 2c22  {"task":"demo","
+00000010: 6475 7261 7469 6f6e 223a 3630 7d         duration":60}
+```
+
+#### Examples for using the translation feature with template:
+
+A somewhat artificial example using the subject as argument would be:
+```
+nats sub --translate "sed 's/\(.*\)/{{Subject}}: \1/'" cli.json
+```
+
+Output
+```
+00:22:19 Subscribing on cli.json
+[#1] Received on "cli.json"
+cli.json: {"task":"demo","duration":60}
+```
+
+The translation feature makes it possible to write specialized or universal translators to aid in debugging messages in streams or core nats.
+
 ## Benchmarking and Latency Testing
 
 Benchmarking and latency testing is key requirement for evaluating the production preparedness of your NATS network.
@@ -296,145 +387,116 @@ NATS Configuration Context "localhost"
   Server URLs: nats://127.0.0.1:4222
 ```
 
-We can benchmark core NATS publishing performance, here we publish 10 million messages from 5 concurrent publishers. By
-default messages are published as quick as possible without any acknowledgement or confirmations:
+We can benchmark core NATS publishing performance, here we publish 10 million messages from 2 concurrent publishers. By default, messages are published as quick as possible without any acknowledgement or confirmations:
 
 ```
-nats bench test --msgs=10000000 --pub 5 
+nats bench pub test --msgs 10000000 --clients 2 --no-progress
 ```
 Output
-```                                                                                                                                                                                                                                                                                                                                                                         <13:03:30
-01:30:14 Starting benchmark [msgs=10,000,000, msgsize=128 B, pubs=5, subs=0, js=false, stream=benchstream  storage=memory, syncpub=false, pubbatch=100, jstimeout=30s, pull=false, pullbatch=100, request=false, reply=false, noqueue=false, maxackpending=-1, replicas=1, purge=false]
-Finished      0s [================================================] 100%
-Finished      0s [================================================] 100%
-Finished      0s [================================================] 100%
-Finished      0s [================================================] 100%
-Finished      0s [================================================] 100%
+```
+15:21:29 Starting Core NATS publish benchmark [clients=2, msg-size=128 B, msgs=10,000,000, multi-subject=false, multi-subject-max=100,000, sleep=0s, subject=test]
+15:21:29 Starting publisher, publishing 5,000,000 messages
+15:21:29 Starting publisher, publishing 5,000,000 messages
 
-Pub stats: 14,047,987 msgs/sec ~ 1.67 GB/sec
- [1] 3,300,540 msgs/sec ~ 402.90 MB/sec (2000000 msgs)
- [2] 3,306,601 msgs/sec ~ 403.64 MB/sec (2000000 msgs)
- [3] 3,296,538 msgs/sec ~ 402.41 MB/sec (2000000 msgs)
- [4] 2,813,752 msgs/sec ~ 343.48 MB/sec (2000000 msgs)
- [5] 2,811,227 msgs/sec ~ 343.17 MB/sec (2000000 msgs)
- min 2,811,227 | avg 3,105,731 | max 3,306,601 | stddev 239,453 msgs
+Pub stats: 5,577,271 msgs/sec ~ 680.82 MB/sec
+ [1] 2,794,891 msgs/sec ~ 341.17 MB/sec (5000000 msgs)
+ [2] 2,788,663 msgs/sec ~ 340.41 MB/sec (5000000 msgs)
+ min 2,788,663 | avg 2,791,777 | max 2,794,891 | stddev 3,114 msgs
 ```
 
-Adding `--sub 2` will start two subscribers on the same subject and measure the rate of messages:
+Run a `nats bench sub` instance with two concurrent subscribers on the same subject (so a fan out of 1 to 2) while publishing messages to measure the rate of messages being delivered:
 
 ```
-nats bench test --msgs=10000000 --pub 5 --sub 2 
+nats bench sub test --msgs 10000000 --clients 2 --no-progress & nats bench pub test --msgs 10000000 --clients 2 --no-progress
 ```
 Output
 ```
 ...
-01:30:52 Starting benchmark [msgs=10,000,000, msgsize=128 B, pubs=5, subs=2, js=false, stream=benchstream  storage=memory, syncpub=false, pubbatch=100, jstimeout=30s, pull=false, pullbatch=100, request=false, reply=false, noqueue=false, maxackpending=-1, replicas=1, purge=false]
-01:30:52 Starting subscriber, expecting 10,000,000 messages
-01:30:52 Starting subscriber, expecting 10,000,000 messages
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
-Finished      6s [================================================] 100%
+15:28:02 Starting Core NATS publish benchmark [clients=2, msg-size=128 B, msgs=10,000,000, multi-subject=false, multi-subject-max=100,000, sleep=0s, subject=test]
+15:28:02 Starting Core NATS subscribe benchmark [clients=2, msg-size=128 B, msgs=10,000,000, multi-subject=false, subject=test]
+15:28:02 Starting publisher, publishing 5,000,000 messages
+15:28:02 Starting publisher, publishing 5,000,000 messages
 
-NATS Pub/Sub stats: 4,906,104 msgs/sec ~ 598.89 MB/sec
- Pub stats: 1,635,428 msgs/sec ~ 199.64 MB/sec
-  [1] 328,573 msgs/sec ~ 40.11 MB/sec (2000000 msgs)
-  [2] 328,147 msgs/sec ~ 40.06 MB/sec (2000000 msgs)
-  [3] 327,411 msgs/sec ~ 39.97 MB/sec (2000000 msgs)
-  [4] 327,318 msgs/sec ~ 39.96 MB/sec (2000000 msgs)
-  [5] 327,283 msgs/sec ~ 39.95 MB/sec (2000000 msgs)
-  min 327,283 | avg 327,746 | max 328,573 | stddev 520 msgs
- Sub stats: 3,271,233 msgs/sec ~ 399.32 MB/sec
-  [1] 1,635,682 msgs/sec ~ 199.67 MB/sec (10000000 msgs)
-  [2] 1,635,616 msgs/sec ~ 199.66 MB/sec (10000000 msgs)
-  min 1,635,616 | avg 1,635,649 | max 1,635,682 | stddev 33 msgs
+
+Pub stats: 1,174,233 msgs/sec ~ 143.34 MB/sec
+ [1] 587,522 msgs/sec ~ 71.72 MB/sec (5000000 msgs)
+ [2] 587,116 msgs/sec ~ 71.67 MB/sec (5000000 msgs)
+ min 587,116 | avg 587,319 | max 587,522 | stddev 203 msgs
+
+Sub stats: 2,348,602 msgs/sec ~ 286.69 MB/sec
+ [1] 1,174,312 msgs/sec ~ 143.35 MB/sec (10000000 msgs)
+ [2] 1,174,301 msgs/sec ~ 143.35 MB/sec (10000000 msgs)
+ min 1,174,301 | avg 1,174,306 | max 1,174,312 | stddev 5 msgs
 ```
 
-JetStream testing can be done by adding the `--js` flag. You can for example measure first the speed of publishing into a stream
+JetStream testing can be done by using the `nats bench js` command. You can for example measure first the speed of publishing into a stream (that gets created first).
 
 ```
-nats bench js.bench --js --pub 2 --msgs 1000000 --purge 
+nats bench js pub js.bench --clients 2 --msgs 1000000 --no-progress --create
 ```
 Output
 ```
-01:37:36 Starting benchmark [msgs=1,000,000, msgsize=128 B, pubs=2, subs=0, js=true, stream=benchstream  storage=memory, syncpub=false, pubbatch=100, jstimeout=30s, pull=false, pullbatch=100, request=false, reply=false, noqueue=false, maxackpending=-1, replicas=1, purge=true]
-01:37:36 Purging the stream
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
+15:32:41 Starting JetStream publish benchmark [batch=500, clients=2, dedup-window=2m0s, deduplication=false, max-bytes=1,073,741,824, msg-size=128 B, msgs=1,000,000, multi-subject=false, multi-subject-max=100,000, purge=false, replicas=1, sleep=0s, storage=file, stream=benchstream, subject=js.bench]
+15:32:41 Starting JS publisher, publishing 500,000 messages
+15:32:41 Starting JS publisher, publishing 500,000 messages
 
-Pub stats: 415,097 msgs/sec ~ 50.67 MB/sec
- [1] 207,907 msgs/sec ~ 25.38 MB/sec (500000 msgs)
- [2] 207,572 msgs/sec ~ 25.34 MB/sec (500000 msgs)
- min 207,572 | avg 207,739 | max 207,907 | stddev 167 msgs
+Pub stats: 230,967 msgs/sec ~ 28.19 MB/sec
+ [1] 116,246 msgs/sec ~ 14.19 MB/sec (500000 msgs)
+ [2] 115,483 msgs/sec ~ 14.10 MB/sec (500000 msgs)
+ min 115,483 | avg 115,864 | max 116,246 | stddev 381 msgs
 ```
-And then you can for example measure the speed of receiving (i.e. replay) the messages from the stream using ordered push consumers
+And then you can for example measure the speed of receiving (i.e. replay) the messages from the stream using ordered consumers
 ```
-nats bench js.bench --js --sub 4 --msgs 1000000 
+nats bench js ordered --msgs 1000000 --no-progress
 ```
 Output
 ```
-01:40:05 Starting benchmark [msgs=1,000,000, msgsize=128 B, pubs=0, subs=4, js=true, stream=benchstream  storage=memory, syncpub=false, pubbatch=100, jstimeout=30s, pull=false, pullbatch=100, request=false, reply=false, noqueue=false, maxackpending=-1, replicas=1, purge=false]
-01:40:05 Starting subscriber, expecting 1,000,000 messages
-01:40:05 Starting subscriber, expecting 1,000,000 messages
-01:40:05 Starting subscriber, expecting 1,000,000 messages
-01:40:05 Starting subscriber, expecting 1,000,000 messages
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
+15:34:23 Starting JetStream ordered ephemeral consumer benchmark [clients=1, msg-size=128 B, msgs=1,000,000, purge=false, sleep=0s, stream=benchstream]
+15:34:23 Starting subscriber, expecting 1,000,000 messages
 
-Sub stats: 1,522,920 msgs/sec ~ 185.90 MB/sec
- [1] 382,739 msgs/sec ~ 46.72 MB/sec (1000000 msgs)
- [2] 382,772 msgs/sec ~ 46.73 MB/sec (1000000 msgs)
- [3] 382,407 msgs/sec ~ 46.68 MB/sec (1000000 msgs)
- [4] 381,060 msgs/sec ~ 46.52 MB/sec (1000000 msgs)
- min 381,060 | avg 382,244 | max 382,772 | stddev 698 msgs
+Sub stats: 621,415 msgs/sec ~ 75.86 MB/sec
 ```
 
-Similarily you can benchmark synchronous request-reply type of interactions using the `--request` and `--reply` flags. For example you can first start one (or more) replier(s)
+Similarily you can benchmark synchronous request-reply type of interactions using the NATS service functionality through the `nats service serve` and `nats service request` commands. For example you can first start 2 service instances in one window
 
 ```
-nats bench test --sub 2 --reply
+nats bench service serve test.service --clients 2
 ```
 
-And then run a benchmark with one (or more) synchronous requester(s)
+And then run a benchmark with 10 synchronous requesters in another window
 
 ```
-nats bench test --pub 10 --request  
+nats bench service request test.service --clients 10 --no-progress
 ```
 Output
 ```
-03:04:56 Starting benchmark [msgs=100,000, msgsize=128 B, pubs=10, subs=0, js=false, stream=benchstream  storage=memory, syncpub=false, pubbatch=100, jstimeout=30s, pull=false, pullbatch=100, request=true, reply=false, noqueue=false, maxackpending=-1, replicas=1, purge=false]
-03:04:56 Benchmark in request-reply mode
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
-Finished      2s [================================================] 100%
+15:39:08 Starting Core NATS service request benchmark [clients=10, msg-size=128 B, msgs=100,000, sleep=0s, subject=test.service]
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
+15:39:08 Starting requester, requesting 10,000 messages
 
-Pub stats: 40,064 msgs/sec ~ 4.89 MB/sec
- [1] 4,045 msgs/sec ~ 505.63 KB/sec (10000 msgs)
- [2] 4,031 msgs/sec ~ 503.93 KB/sec (10000 msgs)
- [3] 4,034 msgs/sec ~ 504.37 KB/sec (10000 msgs)
- [4] 4,031 msgs/sec ~ 503.92 KB/sec (10000 msgs)
- [5] 4,022 msgs/sec ~ 502.85 KB/sec (10000 msgs)
- [6] 4,028 msgs/sec ~ 503.59 KB/sec (10000 msgs)
- [7] 4,025 msgs/sec ~ 503.22 KB/sec (10000 msgs)
- [8] 4,028 msgs/sec ~ 503.59 KB/sec (10000 msgs)
- [9] 4,025 msgs/sec ~ 503.15 KB/sec (10000 msgs)
- [10] 4,018 msgs/sec ~ 502.28 KB/sec (10000 msgs)
- min 4,018 | avg 4,028 | max 4,045 | stddev 7 msgs
+Pub stats: 28,003 msgs/sec ~ 3.42 MB/sec
+ [1] 2,817 msgs/sec ~ 352.17 KB/sec (10000 msgs)
+ [2] 2,816 msgs/sec ~ 352.03 KB/sec (10000 msgs)
+ [3] 2,814 msgs/sec ~ 351.84 KB/sec (10000 msgs)
+ [4] 2,814 msgs/sec ~ 351.77 KB/sec (10000 msgs)
+ [5] 2,812 msgs/sec ~ 351.55 KB/sec (10000 msgs)
+ [6] 2,805 msgs/sec ~ 350.69 KB/sec (10000 msgs)
+ [7] 2,803 msgs/sec ~ 350.49 KB/sec (10000 msgs)
+ [8] 2,803 msgs/sec ~ 350.49 KB/sec (10000 msgs)
+ [9] 2,801 msgs/sec ~ 350.21 KB/sec (10000 msgs)
+ [10] 2,800 msgs/sec ~ 350.05 KB/sec (10000 msgs)
+ min 2,800 | avg 2,808 | max 2,817 | stddev 6 msgs
 ```
 
-There are numerous other flags that can be set to configure size of messages, using push or pull JetStream consumers and much more, see `nats bench --help`.
+There are numerous other flags that can be set to configure size of messages, using fetch or consume for JetStream consumers and much more, see `nats bench` and `nats cheat bench` for some examples.
 
 ### Latency
 
@@ -677,6 +739,88 @@ Additional to this various reports can be generated using `nats server report`, 
 subscriptions across the entire cluster with filtering to limit the results by account etc.
 
 Additional raw information in JSON format can be retrieved using the `nats server request` commands.
+
+### Monitoring
+
+The `nats server check` command provides numerous monitoring utilities that supports the popular Nagios exist code based
+protocol, a format compatible with Prometheus `textfile` format and a human friendly textual output.
+
+Using these tools one can create monitors for various aspects of NATS Server, JetStream and KV.
+
+#### Stream and Consumer monitoring
+
+The `nats server check stream` and `nats server check consumer` commands can be used to monitor the health of Streams and 
+Consumers.
+
+We'll cover the flags below but since version `0.2.0` these commands support auto configuration from Metadata on the 
+Stream and Consumer.  For example if the command accepts `--msgs-warn` then the metadata `io.nats.monitor.msgs-warn`
+can be used to set the same value.  Calling the check command without passing the value on the command will use the
+metadata value instead.
+
+##### Streams
+
+The stream check command allows the health of a stream to be monitored including Sources, Mirrors, Cluster Health 
+and more. 
+
+To perform end to end health checks on a stream it is suggested that canary messages are published regularly into the 
+stream with clients detecting those and discarding them after ACK.
+
+The `nats server check message` command can be used to check such canary messages exist in the stream, how old they 
+are and if the content is correct. We suggest using this in complex Sourcing and Mirroring setups to perform an 
+additional out-of-band health check on the flow of messages.  This includes checking timestamps on the messages.
+
+`--lag-critical=MSGS` Critical threshold to allow for lag on any source or mirror. Lag is how many tasks the source or 
+mirror is behind, this means the mirror or source do not have complete data and would require fixing.
+
+`--seen-critical=DURATION` Critical threshold for how long ago the source or mirror should have been seen. During 
+network outages or problems with the foreign Stream this time would increase.  The duration can be a string like `5m`.
+
+`--min-sources=SOURCES`, `--max-sources=SOURCES` Minimum and Maximum number of sources to expect, this allow you to 
+monitor that in a dynamically configured environment that the set number of sources are configured.
+
+`--peer-expect=SERVERS` Number of cluster replicas to expect, again allowing an assertion that the configuration does
+not change unexpectedly
+
+`--peer-lag-critical=OPS` Critical threshold to allow for cluster peer lag, any RAFT peer that is further behind than
+this number of operations will result in a critical error
+
+`--peer-seen-critical=DURATION` Critical threshold for how long ago a cluster peer should have been seen, this is 
+sumular to the lag on Sources and Mirrors but checks the lag in the Raft cluster.
+
+`--msgs-warn=MSGS` and `--msgs-critical=MSGS` Checks the number of messages in the stream, if warn is smaller than 
+critical the check will alert for fewer messages than the thresholds.
+
+`--subjects-warn=SUBJECTS` and `--subjects-critical=SUBJECTS` Checks the number of subjects in the stream.  If warn is 
+bigger than critical the logic will be inverted ensuring that no more than the thresholds exist in the stream.
+
+##### Consumers
+
+The consumer check is concerned with message flow through a consumer and have various adjustable thresholds in duration
+and count to detect stalled consumers, consumers with no active clients, consumers with slow clients or ones where 
+processing the messages are failing.
+
+A suggested pattern is publishing canary messages into the stream regularly, perhaps with the header `Canary: 1` set, 
+and having applications just ACK and discard those messages. This way even in idle times the end to end flow of messages 
+can be monitored.
+
+`--outstanding-ack-critical=-1` Maximum number of outstanding acks to allow, this allow you to alert on the scenario 
+where clients consuming messages are slow to process messages and the number of outstanding acks are growing.  Once this
+hits the configured max the consumer will stall.
+
+`--waiting-critical=-1` Maximum number of waiting pulls to allow
+
+`--unprocessed-critical=-1` Maximum number of unprocessed messages to allow, this indicates how far behind the end 
+of the stream the consumer is, in work queue scenarios this will indicate a alert if the amount of outstanding work 
+grows.
+
+`--last-delivery-critical=0s` This is the time duration since the last delivery to a client, if this number grows it 
+could mean there are no messages to deliver or no clients to deliver messages to.
+
+`--last-ack-critical=0s` This is the duration of time since the last message was acknowledged, this duration might 
+indicate that no messages are being successfully processed.
+
+`--redelivery-critical=-1` Alerts on the number of redeliveries currently in flight, a high number means many clients
+are doing NAKs or not completing message processing within the allowed Ack window.
 
 ### Schema Registry
 

@@ -16,6 +16,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	iu "github.com/nats-io/natscli/internal/util"
+	"io"
 	"os"
 	"strings"
 
@@ -30,15 +32,28 @@ type schemaValidateCmd struct {
 
 func configureSchemaValidateCommand(schema *fisk.CmdClause) {
 	c := &schemaValidateCmd{}
+
 	validate := schema.Command("validate", "Validates a JSON file against a schema").Alias("check").Action(c.validate)
 	validate.Arg("schema", "Schema ID to validate against").Required().StringVar(&c.schema)
-	validate.Arg("file", "JSON data to validate").Required().StringVar(&c.file)
+	validate.Arg("file", "JSON data to validate (- for stdin)").Required().StringVar(&c.file)
 	validate.Flag("json", "Produce JSON format output").UnNegatableBoolVar(&c.json)
-
 }
 
 func (c *schemaValidateCmd) validate(_ *fisk.ParseContext) error {
-	file, err := os.ReadFile(c.file)
+	var f io.ReadCloser
+	var err error
+
+	if c.file == "-" {
+		f = os.Stdin
+	} else {
+		f, err = os.Open(c.file)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+	}
+
+	file, err := io.ReadAll(f)
 	if err != nil {
 		return err
 	}
@@ -54,7 +69,7 @@ func (c *schemaValidateCmd) validate(_ *fisk.ParseContext) error {
 		if errs == nil {
 			errs = []string{}
 		}
-		printJSON(errs)
+		iu.PrintJSON(errs)
 		return nil
 	}
 

@@ -1,4 +1,5 @@
 project_name: natscli
+version: 2
 
 release:
   github:
@@ -6,9 +7,10 @@ release:
     name: natscli
   name_template: "Release {{.Version}}"
   draft: true
+  prerelease: auto
 
 changelog:
-  skip: true
+  disable: true
 
 builds:
   - main: ./nats
@@ -27,12 +29,11 @@ builds:
       - arm
       - arm64
       - 386
+      - s390x
     goarm:
       - 6
       - 7
     ignore:
-      - goos: darwin
-        goarch: 386
       - goos: freebsd
         goarch: arm
       - goos: freebsd
@@ -54,18 +55,20 @@ checksum:
 
 brews:
   - name: nats
-    folder: Formula
-    tap:
+    directory: Formula
+    repository:
       owner: nats-io
       name: homebrew-nats-tools
+      token: "{{ .Env.GITHUB_APP_TOKEN }}"
     url_template: "https://github.com/nats-io/natscli/releases/download/{{ .Tag }}/nats-{{.Version}}-{{ .Os }}-{{ .Arch }}{{if .Arm}}{{.Arm}}{{end}}.zip"
-    homepage: "https://github.com/nats-io/nats"
+    homepage: "https://github.com/nats-io/natscli"
     description: "NATS utility"
-    skip_upload: false
+    skip_upload: auto
     test: |
       system "#{bin}/nats --version"
     install: |
       bin.install "nats"
+      generate_completions_from_executable(bin/"nats", shells: [:bash, :zsh], shell_parameter_format: "--completion-script-")
 
 nfpms:
   - file_name_template: 'nats-{{.Version}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}'

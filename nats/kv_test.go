@@ -1,14 +1,27 @@
+// Copyright 2024 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
 	"bytes"
 	"fmt"
+	"github.com/nats-io/natscli/cli"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/natscli/cli"
 )
 
 func init() {
@@ -59,23 +72,131 @@ func TestCLIKVGet(t *testing.T) {
 	}
 }
 
+func TestCLIKVCreate(t *testing.T) {
+	srv, nc, _ := setupJStreamTest(t)
+	defer srv.Shutdown()
+
+	store := createTestBucket(t, nc, nil)
+	kvCreateCmd := fmt.Sprintf("--server='%s' kv create %s", srv.ClientURL(), store.Bucket())
+
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+		stdin bool
+	}{
+		{"simple", "X", "VAL", false},
+		{"empty", "Y", "", false},
+		{"stdin", "Z", "VAL", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.stdin {
+				out := runNatsCliWithInput(t, test.value, fmt.Sprintf("%s %s", kvCreateCmd, test.key))
+				if strings.TrimSpace(string(out)) != "" {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			} else {
+				out := runNatsCli(t, fmt.Sprintf("%s %s %s", kvCreateCmd, test.key, test.value))
+				if strings.TrimSpace(string(out)) != test.value {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			}
+
+			val, err := store.Get(test.key)
+			if err != nil {
+				t.Fatalf("get failed: %s", err)
+			}
+			if !bytes.Equal(val.Value(), []byte(test.value)) {
+				t.Fatalf("invalid value saved: %s", val.Value())
+			}
+		})
+	}
+}
+
 func TestCLIKVPut(t *testing.T) {
 	srv, nc, _ := setupJStreamTest(t)
 	defer srv.Shutdown()
 
 	store := createTestBucket(t, nc, nil)
+	kvPutCmd := fmt.Sprintf("--server='%s' kv put %s", srv.ClientURL(), store.Bucket())
 
-	out := runNatsCli(t, fmt.Sprintf("--server='%s' kv put T X VAL", srv.ClientURL()))
-	if strings.TrimSpace(string(out)) != "VAL" {
-		t.Fatalf("put failed: %s", string(out))
-	}
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+		stdin bool
+	}{
+		{"simple", "X", "VAL", false},
+		{"empty", "Y", "", false},
+		{"stdin", "Z", "VAL", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.stdin {
+				out := runNatsCliWithInput(t, test.value, fmt.Sprintf("%s %s", kvPutCmd, test.key))
+				if strings.TrimSpace(string(out)) != "" {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			} else {
+				out := runNatsCli(t, fmt.Sprintf("%s %s %s", kvPutCmd, test.key, test.value))
+				if strings.TrimSpace(string(out)) != test.value {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			}
 
-	val, err := store.Get("X")
-	if err != nil {
-		t.Fatalf("get failed: %s", err)
+			val, err := store.Get(test.key)
+			if err != nil {
+				t.Fatalf("get failed: %s", err)
+			}
+			if !bytes.Equal(val.Value(), []byte(test.value)) {
+				t.Fatalf("invalid value saved: %s", val.Value())
+			}
+		})
 	}
-	if !bytes.Equal(val.Value(), []byte("VAL")) {
-		t.Fatalf("invalid value saved: %s", val.Value())
+}
+
+func TestCLIKVUpdate(t *testing.T) {
+	srv, nc, _ := setupJStreamTest(t)
+	defer srv.Shutdown()
+
+	store := createTestBucket(t, nc, nil)
+	kvUpdateCmd := fmt.Sprintf("--server='%s' kv update %s", srv.ClientURL(), store.Bucket())
+
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+		stdin bool
+	}{
+		{"simple", "X", "VAL", false},
+		{"empty", "Y", "", false},
+		{"stdin", "Z", "VAL", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rev := mustPut(t, store, test.key, "OLD")
+
+			if test.stdin {
+				out := runNatsCliWithInput(t, test.value, fmt.Sprintf("%s %s '' %d", kvUpdateCmd, test.key, rev))
+				if strings.TrimSpace(string(out)) != "" {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			} else {
+				out := runNatsCli(t, fmt.Sprintf("%s %s '%s' %d", kvUpdateCmd, test.key, test.value, rev))
+				if strings.TrimSpace(string(out)) != test.value {
+					t.Fatalf("put failed: %s", string(out))
+				}
+			}
+
+			val, err := store.Get(test.key)
+			if err != nil {
+				t.Fatalf("get failed: %s", err)
+			}
+			if rev == val.Revision() {
+				t.Fatalf("invalid revision: %d", val.Revision())
+			}
+			if !bytes.Equal(val.Value(), []byte(test.value)) {
+				t.Fatalf("invalid value saved: %s", val.Value())
+			}
+		})
 	}
 }
 

@@ -1,0 +1,66 @@
+name: Release
+on:
+  push:
+    tags:
+      - v[0-9]+\.[0-9]+\.[0-9]+
+      - v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install deps
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/client9/misspell/cmd/misspell@latest
+
+      - name: Lint
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          PATH=$PATH:$GOPATH/bin
+          GO_LIST=$(go list ./... | grep -F -e asciigraph -v)
+          $(exit $(go fmt $GO_LIST | wc -l))
+          go vet -composites=false $GO_LIST
+          find . -type f -name "*.go" | grep -F -e asciigraph -v | xargs misspell -error -locale US
+          staticcheck -f stylish $GO_LIST
+
+      - name: Test
+        shell: bash --noprofile --norc -x -eo pipefail {0}
+        run: |
+          set -e
+          cd nats
+          go build
+          cd ..
+          go list ./... | grep -F -e asciigraph -v | xargs go test -v --failfast -p=1
+
+
+      - name: Create GitHub App Token
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.NATSIO_ARTIFACT_CROSS_REPO_PUSHER_APP_ID }}
+          private-key: ${{ secrets.NATSIO_ARTIFACT_CROSS_REPO_PUSHER_PRIVATE_KEY }}
+          owner: "nats-io"
+          repositories: "homebrew-nats-tools"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_APP_TOKEN: ${{ steps.token.outputs.token }}

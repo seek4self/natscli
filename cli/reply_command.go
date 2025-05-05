@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package cli
 
 import (
 	"fmt"
+	iu "github.com/nats-io/natscli/internal/util"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -85,7 +86,7 @@ Available template functions are:
 	act.Flag("command", "Runs a command and responds with the output if exit code was 0").StringVar(&c.command)
 	act.Flag("queue", "Queue group name").Default("NATS-RPLY-22").Short('q').StringVar(&c.queue)
 	act.Flag("sleep", "Inject a random sleep delay between replies up to this duration max").PlaceHolder("MAX").DurationVar(&c.sleep)
-	act.Flag("header", "Adds headers to the message").Short('H').StringsVar(&c.hdrs)
+	act.Flag("header", "Adds headers to the message using K:V format").Short('H').StringsVar(&c.hdrs)
 	act.Flag("count", "Quit after receiving this many messages").UintVar(&c.limit)
 }
 
@@ -124,7 +125,10 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 
 		msg := nats.NewMsg(m.Reply)
 		if nc.HeadersSupported() && len(c.hdrs) > 0 {
-			parseStringsToMsgHeader(c.hdrs, i, msg)
+			err = iu.ParseStringsToMsgHeader(c.hdrs, i, msg)
+			if err != nil {
+				return
+			}
 		}
 
 		switch {
@@ -149,7 +153,7 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 				rawCmd = strings.Replace(rawCmd, fmt.Sprintf("{{%d}}", i), t, -1)
 			}
 
-			parsedCmd, err := pubReplyBodyTemplate(rawCmd, string(m.Data), i)
+			parsedCmd, err := iu.PubReplyBodyTemplate(rawCmd, string(m.Data), i)
 			if err != nil {
 				log.Printf("Could not parse command template: %s", err)
 			}
@@ -166,7 +170,7 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 				args = cmdParts[1:]
 			}
 
-			if opts.Trace {
+			if opts().Trace {
 				log.Printf("Executing: %s", strings.Join(cmdParts, " "))
 			}
 
@@ -180,7 +184,7 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 			}
 
 		default:
-			body, err := pubReplyBodyTemplate(c.body, string(m.Data), i)
+			body, err := iu.PubReplyBodyTemplate(c.body, string(m.Data), i)
 			if err != nil {
 				log.Printf("Could not parse body template: %s", err)
 			}
@@ -197,6 +201,7 @@ func (c *replyCmd) reply(_ *fisk.ParseContext) error {
 		i++
 
 		if c.limit != 0 && uint(i) == c.limit {
+			nc.Flush()
 			ic <- os.Interrupt
 		}
 	})

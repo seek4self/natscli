@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,6 +16,7 @@ package cli
 import (
 	"crypto/tls"
 	"fmt"
+	iu "github.com/nats-io/natscli/internal/util"
 	"net"
 	"net/url"
 	"strings"
@@ -67,7 +68,7 @@ func (c *rttCmd) rtt(_ *fisk.ParseContext) error {
 	}
 
 	if c.json {
-		printJSON(targets)
+		iu.PrintJSON(targets)
 
 		return nil
 	}
@@ -120,7 +121,7 @@ func (c *rttCmd) performTest(targets []*rttTarget) (err error) {
 
 		for _, r := range target.Results {
 			r.Time = time.Now()
-			r.URL, r.RTT, err = c.calcRTT(target.URL, opts)
+			r.URL, r.RTT, err = c.calcRTT(r.Address, opts)
 			if err != nil {
 				return err
 			}
@@ -131,7 +132,7 @@ func (c *rttCmd) performTest(targets []*rttTarget) (err error) {
 }
 
 func (c *rttCmd) calcRTT(server string, copts []nats.Option) (string, time.Duration, error) {
-	opts.Conn = nil
+	opts().Conn = nil
 
 	nc, err := newNatsConn(server, copts...)
 	if err != nil {
@@ -143,6 +144,9 @@ func (c *rttCmd) calcRTT(server string, copts []nats.Option) (string, time.Durat
 
 	var totalTime time.Duration
 
+	if opts().Trace {
+		fmt.Printf("RTT iterations for server: %s\n", server)
+	}
 	for i := 1; i <= c.iterations; i++ {
 		rtt, err := nc.RTT()
 		if err != nil {
@@ -150,6 +154,12 @@ func (c *rttCmd) calcRTT(server string, copts []nats.Option) (string, time.Durat
 		}
 
 		totalTime += rtt
+		if opts().Trace {
+			fmt.Printf("#%d:\trtt=%s\n", i, rtt)
+			if i == c.iterations {
+				fmt.Println()
+			}
+		}
 	}
 
 	return nc.ConnectedUrl(), totalTime / time.Duration(c.iterations), nil
@@ -157,10 +167,10 @@ func (c *rttCmd) calcRTT(server string, copts []nats.Option) (string, time.Durat
 
 func (c *rttCmd) targets() (targets []*rttTarget, err error) {
 	servers := ""
-	if opts.Conn != nil {
-		servers = strings.Join(opts.Conn.DiscoveredServers(), ",")
-	} else if opts.Config != nil {
-		servers = opts.Config.ServerURL()
+	if opts().Conn != nil {
+		servers = strings.Join(opts().Conn.DiscoveredServers(), ",")
+	} else if opts().Config != nil {
+		servers = opts().Config.ServerURL()
 	} else {
 		return nil, fmt.Errorf("cannot find a server list to test")
 	}

@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,9 +15,9 @@ package cli
 
 import (
 	"fmt"
-
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/choria-io/fisk"
+	iu "github.com/nats-io/natscli/internal/util"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -44,7 +44,7 @@ func (c *SrvPasswdCmd) mkpasswd(_ *fisk.ParseContext) error {
 	var err error
 
 	if c.pass == "" && c.generate {
-		c.pass = randomPassword(22)
+		c.pass = iu.RandomPassword(22)
 		fmt.Printf("Generated password: %s\n", c.pass)
 	} else if c.pass == "" && !c.generate {
 		c.pass, err = c.askPassword()
@@ -75,12 +75,12 @@ func (c *SrvPasswdCmd) askPassword() (string, error) {
 	bp1 := ""
 	bp2 := ""
 
-	err := askOne(&survey.Password{Message: "Enter password", Help: "Enter a password string that's minimum 22 characters long"}, &bp1)
+	err := iu.AskOne(&survey.Password{Message: "Enter password", Help: "Enter a password string that's minimum 22 characters long"}, &bp1)
 	if err != nil {
 		return "", fmt.Errorf("could not read password: %w", err)
 	}
 	fmt.Println()
-	err = askOne(&survey.Password{Message: "Reenter password", Help: "Enter the same password again"}, &bp2)
+	err = iu.AskOne(&survey.Password{Message: "Re-enter password", Help: "Enter the same password again"}, &bp2)
 	if err != nil {
 		return "", fmt.Errorf("could not read password: %w", err)
 	}
@@ -88,7 +88,7 @@ func (c *SrvPasswdCmd) askPassword() (string, error) {
 	fmt.Println()
 
 	if bp1 != bp2 {
-		return "", fmt.Errorf("passwords do not match (%s != %s)", bp1, bp2)
+		return "", fmt.Errorf("entered and re-entered passwords do not match")
 	}
 
 	return bp1, nil

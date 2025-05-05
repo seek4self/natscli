@@ -1,4 +1,4 @@
-// Copyright 2020-2022 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,41 +14,36 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
-	"net/textproto"
 	"os"
-	"regexp"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
-	"unicode"
+
+	"github.com/jedib0t/go-pretty/v6/progress"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/choria-io/fisk"
-	"github.com/dustin/go-humanize"
-	"github.com/gosuri/uiprogress"
+	"github.com/google/shlex"
 	"github.com/klauspost/compress/s2"
-	"github.com/nats-io/jsm.go/api"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nuid"
-	"github.com/xlab/tablewriter"
-	terminal "golang.org/x/term"
-
 	"github.com/nats-io/jsm.go"
-
+	"github.com/nats-io/jsm.go/api"
 	"github.com/nats-io/jsm.go/natscontext"
+	"github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	iu "github.com/nats-io/natscli/internal/util"
+	"github.com/nats-io/natscli/options"
 )
 
 func selectConsumer(mgr *jsm.Manager, stream string, consumer string, force bool) (string, *jsm.Consumer, error) {
@@ -63,6 +58,10 @@ func selectConsumer(mgr *jsm.Manager, stream string, consumer string, force bool
 		return "", nil, fmt.Errorf("unknown consumer %q > %q", stream, consumer)
 	}
 
+	if !iu.IsTerminal() {
+		return "", nil, fmt.Errorf("cannot pick a Consumer without a terminal and no Consumer name supplied")
+	}
+
 	consumers, err := mgr.ConsumerNames(stream)
 	if err != nil {
 		return "", nil, err
@@ -74,16 +73,20 @@ func selectConsumer(mgr *jsm.Manager, stream string, consumer string, force bool
 	default:
 		c := ""
 
-		err = askOne(&survey.Select{
+		err = iu.AskOne(&survey.Select{
 			Message:  "Select a Consumer",
 			Options:  consumers,
-			PageSize: selectPageSize(len(consumers)),
+			PageSize: iu.SelectPageSize(len(consumers)),
 		}, &c)
 		if err != nil {
 			return "", nil, err
 		}
 
-		return c, nil, nil
+		con, err := mgr.LoadConsumer(stream, c)
+		if err != nil {
+			return "", nil, err
+		}
+		return con.Name(), con, err
 	}
 }
 
@@ -116,6 +119,10 @@ func selectStream(mgr *jsm.Manager, stream string, force bool, all bool) (string
 		return stream, nil, nil
 	}
 
+	if !iu.IsTerminal() {
+		return "", nil, fmt.Errorf("cannot pick a Stream without a terminal and no Stream name supplied")
+	}
+
 	if force {
 		return "", nil, fmt.Errorf("unknown stream %q", stream)
 	}
@@ -126,10 +133,10 @@ func selectStream(mgr *jsm.Manager, stream string, force bool, all bool) (string
 	default:
 		s := ""
 
-		err = askOne(&survey.Select{
+		err = iu.AskOne(&survey.Select{
 			Message:  "Select a Stream",
 			Options:  matched,
-			PageSize: selectPageSize(len(matched)),
+			PageSize: iu.SelectPageSize(len(matched)),
 		}, &s)
 		if err != nil {
 			return "", nil, err
@@ -139,90 +146,21 @@ func selectStream(mgr *jsm.Manager, stream string, force bool, all bool) (string
 	}
 }
 
-func askOne(p survey.Prompt, response any, opts ...survey.AskOpt) error {
-	if !isTerminal() {
-		return fmt.Errorf("cannot prompt for user input without a terminal")
+func sinceRefOrNow(ref time.Time, ts time.Time) time.Duration {
+	if ref.IsZero() {
+		return time.Since(ts)
 	}
-
-	return survey.AskOne(p, response, opts...)
-}
-
-func toJSON(d any) (string, error) {
-	j, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return "", err
-	}
-
-	return string(j), nil
-}
-
-func printJSON(d any) error {
-	j, err := json.MarshalIndent(d, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	fmt.Println(string(j))
-
-	return nil
-}
-func parseDurationString(dstr string) (dur time.Duration, err error) {
-	dstr = strings.TrimSpace(dstr)
-	if len(dstr) == 0 {
-		return 0, nil
-	}
-
-	return fisk.ParseDuration(dstr)
-}
-
-// calculates progress bar width for uiprogress:
-//
-// if it cant figure out the width, assume 80
-// if the width is too small, set it to minWidth and just live with the overflow
-//
-// this ensures a reasonable progress size, ideally we should switch over
-// to a spinner for < minWidth rather than cause overflows, but thats for later.
-func progressWidth() int {
-	w, _, err := terminal.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return 80
-	}
-
-	minWidth := 10
-
-	if w-30 <= minWidth {
-		return minWidth
-	} else {
-		return w - 30
-	}
-}
-
-func selectPageSize(count int) int {
-	_, h, err := terminal.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		h = 40
-	}
-
-	ps := count
-	if ps > h-4 {
-		ps = h - 4
-	}
-
-	return ps
-}
-
-func isTerminal() bool {
-	return terminal.IsTerminal(int(os.Stdin.Fd()))
+	return ref.Sub(ts)
 }
 
 func askConfirmation(prompt string, dflt bool) (bool, error) {
-	if !isTerminal() {
+	if !iu.IsTerminal() {
 		return false, fmt.Errorf("cannot ask for confirmation without a terminal")
 	}
 
 	ans := dflt
 
-	err := askOne(&survey.Confirm{
+	err := iu.AskOne(&survey.Confirm{
 		Message: prompt,
 		Default: dflt,
 	}, &ans)
@@ -231,13 +169,13 @@ func askConfirmation(prompt string, dflt bool) (bool, error) {
 }
 
 func askOneBytes(prompt string, dflt string, help string, required string) (int64, error) {
-	if !isTerminal() {
+	if !iu.IsTerminal() {
 		return 0, fmt.Errorf("cannot ask for confirmation without a terminal")
 	}
 
 	for {
 		val := ""
-		err := askOne(&survey.Input{
+		err := iu.AskOne(&survey.Input{
 			Message: prompt,
 			Default: dflt,
 			Help:    help,
@@ -250,7 +188,7 @@ func askOneBytes(prompt string, dflt string, help string, required string) (int6
 			val = "0"
 		}
 
-		i, err := parseStringAsBytes(val)
+		i, err := iu.ParseStringAsBytes(val)
 		if err != nil {
 			return 0, err
 		}
@@ -265,12 +203,12 @@ func askOneBytes(prompt string, dflt string, help string, required string) (int6
 }
 
 func askOneInt(prompt string, dflt string, help string) (int64, error) {
-	if !isTerminal() {
+	if !iu.IsTerminal() {
 		return 0, fmt.Errorf("cannot ask for confirmation without a terminal")
 	}
 
 	val := ""
-	err := askOne(&survey.Input{
+	err := iu.AskOne(&survey.Input{
 		Message: prompt,
 		Default: dflt,
 		Help:    help,
@@ -287,44 +225,15 @@ func askOneInt(prompt string, dflt string, help string) (int64, error) {
 	return int64(i), nil
 }
 
-func splitString(s string) []string {
-	return strings.FieldsFunc(s, func(c rune) bool {
-		if unicode.IsSpace(c) {
-			return true
-		}
-
-		if c == ',' {
-			return true
-		}
-
-		return false
-	})
-}
-
-func splitCLISubjects(subjects []string) []string {
-	new := []string{}
-
-	re := regexp.MustCompile(`,|\t|\s`)
-	for _, s := range subjects {
-		if re.MatchString(s) {
-			new = append(new, splitString(s)...)
-		} else {
-			new = append(new, s)
-		}
-	}
-
-	return new
-}
-
 func natsOpts() []nats.Option {
-	if opts.Config == nil {
+	if opts().Config == nil {
 		return []nats.Option{}
 	}
 
-	copts, err := opts.Config.NATSOptions()
+	copts, err := opts().Config.NATSOptions()
 	fisk.FatalIfError(err, "configuration error")
 
-	connectionName := strings.TrimSpace(opts.ConnectionName)
+	connectionName := strings.TrimSpace(opts().ConnectionName)
 	if len(connectionName) == 0 {
 		connectionName = "STHG-MS CLI Version " + Version
 	}
@@ -332,6 +241,16 @@ func natsOpts() []nats.Option {
 	return append(copts, []nats.Option{
 		nats.Name(connectionName),
 		nats.MaxReconnects(-1),
+		nats.ConnectHandler(func(conn *nats.Conn) {
+			if opts().Trace {
+				log.Printf(">>> Connected to %s", conn.ConnectedUrlRedacted())
+			}
+		}),
+		nats.DiscoveredServersHandler(func(conn *nats.Conn) {
+			if opts().Trace {
+				log.Printf(">>> Discovered new servers, known servers are now %s", strings.Join(conn.Servers(), ", "))
+			}
+		}),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			if err != nil {
 				log.Printf("Disconnected due to: %s, will attempt reconnect", err)
@@ -345,14 +264,58 @@ func natsOpts() []nats.Option {
 			if url == "" {
 				log.Printf("Unexpected STHG-MS error: %s", err)
 			} else {
-				log.Printf("Unexpected STHG-MS error from server %s: %s", url, err)
+				log.Printf("Unexpected STHG-MS error from server %s: %s", nc.ConnectedUrlRedacted(), err)
 			}
 		}),
 	}...)
 }
 
+// for new jetstream package
+func jetstreamOpts() []jetstream.JetStreamOpt {
+	opts := opts()
+
+	res := []jetstream.JetStreamOpt{}
+
+	if opts.Trace {
+		ct := &jetstream.ClientTrace{
+			RequestSent: func(subj string, payload []byte) {
+				log.Printf(">>> %s\n%s\n\n", subj, string(payload))
+			},
+			ResponseReceived: func(subj string, payload []byte, hdr nats.Header) {
+				log.Printf("<<< %s: %s", subj, string(payload))
+			},
+		}
+		res = append(res, jetstream.WithClientTrace(ct))
+	}
+
+	return res
+}
+
+func jsOpts() []nats.JSOpt {
+	opts := opts()
+	jso := []nats.JSOpt{
+		nats.Domain(opts.Config.JSDomain()),
+		nats.APIPrefix(opts.Config.JSAPIPrefix()),
+		nats.MaxWait(opts.Timeout),
+	}
+
+	if opts.Trace {
+		ct := &nats.ClientTrace{
+			RequestSent: func(subj string, payload []byte) {
+				log.Printf(">>> %s\n%s\n\n", subj, string(payload))
+			},
+			ResponseReceived: func(subj string, payload []byte, hdr nats.Header) {
+				log.Printf("<<< %s: %s", subj, string(payload))
+			},
+		}
+		jso = append(jso, ct)
+	}
+
+	return jso
+}
+
 func addCheat(name string, cmd *fisk.CmdClause) {
-	if opts.NoCheats {
+	if opts().NoCheats {
 		return
 	}
 
@@ -360,12 +323,14 @@ func addCheat(name string, cmd *fisk.CmdClause) {
 }
 
 func newNatsConnUnlocked(servers string, copts ...nats.Option) (*nats.Conn, error) {
+	opts := options.DefaultOptions
+
 	if opts.Conn != nil {
 		return opts.Conn, nil
 	}
 
 	if opts.Config == nil {
-		err := loadContext()
+		err := loadContext(false)
 		if err != nil {
 			return nil, err
 		}
@@ -389,12 +354,14 @@ func newNatsConn(servers string, copts ...nats.Option) (*nats.Conn, error) {
 	return newNatsConnUnlocked(servers, copts...)
 }
 
-func prepareJSHelper() (*nats.Conn, nats.JetStreamContext, error) {
+func prepareJSHelper() (*nats.Conn, jetstream.JetStream, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	var err error
+	opts := options.DefaultOptions
 
+	jsOpts()
 	if opts.Conn == nil {
 		opts.Conn, _, err = prepareHelperUnlocked("", natsOpts()...)
 		if err != nil {
@@ -406,24 +373,15 @@ func prepareJSHelper() (*nats.Conn, nats.JetStreamContext, error) {
 		return opts.Conn, opts.JSc, nil
 	}
 
-	jso := []nats.JSOpt{
-		nats.Domain(opts.JsDomain),
-		nats.APIPrefix(opts.JsApiPrefix),
+	switch {
+	case opts.Config.JSDomain() != "":
+		opts.JSc, err = jetstream.NewWithDomain(opts.Conn, opts.Config.JSDomain(), jetstreamOpts()...)
+	case opts.Config.JSAPIPrefix() != "":
+		opts.JSc, err = jetstream.NewWithAPIPrefix(opts.Conn, opts.Config.JSAPIPrefix(), jetstreamOpts()...)
+	default:
+		opts.JSc, err = jetstream.New(opts.Conn, jetstreamOpts()...)
 	}
 
-	if opts.Trace {
-		ct := &nats.ClientTrace{
-			RequestSent: func(subj string, payload []byte) {
-				log.Printf(">>> %s\n%s\n\n", subj, string(payload))
-			},
-			ResponseReceived: func(subj string, payload []byte, hdr nats.Header) {
-				log.Printf("<<< %s: %s", subj, string(payload))
-			},
-		}
-		jso = append(jso, ct)
-	}
-
-	opts.JSc, err = opts.Conn.JetStream(jso...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -438,11 +396,52 @@ func prepareHelper(servers string, copts ...nats.Option) (*nats.Conn, *jsm.Manag
 	return prepareHelperUnlocked(servers, copts...)
 }
 
+func validator() *SchemaValidator {
+	if os.Getenv("NOVALIDATE") == "" {
+		return new(SchemaValidator)
+	}
+
+	if opts().Trace {
+		log.Printf("!!! Disabling schema validation")
+	}
+
+	return nil
+}
+
+func jsmOpts() []jsm.Option {
+	opts := opts()
+
+	if opts.Config == nil {
+		return []jsm.Option{}
+	}
+
+	jsopts, err := opts.Config.JSMOptions()
+	if err != nil {
+		return nil
+	}
+
+	if os.Getenv("NOVALIDATE") == "" {
+		jsopts = append(jsopts, jsm.WithAPIValidation(validator()))
+	}
+
+	if opts.Timeout != 0 {
+		jsopts = append(jsopts, jsm.WithTimeout(opts.Timeout))
+	}
+
+	if opts.Trace {
+		jsopts = append(jsopts, jsm.WithTrace())
+	}
+
+	return jsopts
+}
+
 func prepareHelperUnlocked(servers string, copts ...nats.Option) (*nats.Conn, *jsm.Manager, error) {
 	var err error
 
+	opts := options.DefaultOptions
+
 	if opts.Config == nil {
-		err = loadContext()
+		err = loadContext(false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -459,25 +458,8 @@ func prepareHelperUnlocked(servers string, copts ...nats.Option) (*nats.Conn, *j
 		return opts.Conn, opts.Mgr, nil
 	}
 
-	jsopts := []jsm.Option{
-		jsm.WithAPIPrefix(opts.Config.JSAPIPrefix()),
-		jsm.WithEventPrefix(opts.Config.JSEventPrefix()),
-		jsm.WithDomain(opts.Config.JSDomain()),
-	}
+	jsopts := jsmOpts()
 
-	if os.Getenv("NOVALIDATE") == "" {
-		jsopts = append(jsopts, jsm.WithAPIValidation(new(SchemaValidator)))
-	}
-
-	if opts.Timeout != 0 {
-		jsopts = append(jsopts, jsm.WithTimeout(opts.Timeout))
-	}
-
-	if opts.Trace {
-		jsopts = append(jsopts, jsm.WithTrace())
-	}
-
-	opts.Conn.NewRespInbox()
 	opts.Mgr, err = jsm.New(opts.Conn, jsopts...)
 	if err != nil {
 		return nil, nil, err
@@ -486,234 +468,9 @@ func prepareHelperUnlocked(servers string, copts ...nats.Option) (*nats.Conn, *j
 	return opts.Conn, opts.Mgr, err
 }
 
-func humanizeDuration(d time.Duration) string {
-	if d == math.MaxInt64 {
-		return "never"
-	}
+func loadContext(softFail bool) error {
+	opts := options.DefaultOptions
 
-	tsecs := d / time.Second
-	tmins := tsecs / 60
-	thrs := tmins / 60
-	tdays := thrs / 24
-	tyrs := tdays / 365
-
-	if tyrs > 0 {
-		return fmt.Sprintf("%dy%dd%dh%dm%ds", tyrs, tdays%365, thrs%24, tmins%60, tsecs%60)
-	}
-
-	if tdays > 0 {
-		return fmt.Sprintf("%dd%dh%dm%ds", tdays, thrs%24, tmins%60, tsecs%60)
-	}
-
-	if thrs > 0 {
-		return fmt.Sprintf("%dh%dm%ds", thrs, tmins%60, tsecs%60)
-	}
-
-	if tmins > 0 {
-		return fmt.Sprintf("%dm%ds", tmins, tsecs%60)
-	}
-
-	return fmt.Sprintf("%.2fs", d.Seconds())
-}
-
-const (
-	hdrLine   = "NATS/1.0\r\n"
-	crlf      = "\r\n"
-	hdrPreEnd = len(hdrLine) - len(crlf)
-	statusLen = 3
-	statusHdr = "Status"
-	descrHdr  = "Description"
-)
-
-// copied from nats.go
-func decodeHeadersMsg(data []byte) (nats.Header, error) {
-	tp := textproto.NewReader(bufio.NewReader(bytes.NewReader(data)))
-	l, err := tp.ReadLine()
-	if err != nil || len(l) < hdrPreEnd || l[:hdrPreEnd] != hdrLine[:hdrPreEnd] {
-		return nil, nats.ErrBadHeaderMsg
-	}
-
-	mh, err := readMIMEHeader(tp)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if we have an inlined status.
-	if len(l) > hdrPreEnd {
-		var description string
-		status := strings.TrimSpace(l[hdrPreEnd:])
-		if len(status) != statusLen {
-			description = strings.TrimSpace(status[statusLen:])
-			status = status[:statusLen]
-		}
-		mh.Add(statusHdr, status)
-		if len(description) > 0 {
-			mh.Add(descrHdr, description)
-		}
-	}
-	return nats.Header(mh), nil
-}
-
-// copied from nats.go
-func readMIMEHeader(tp *textproto.Reader) (textproto.MIMEHeader, error) {
-	m := make(textproto.MIMEHeader)
-	for {
-		kv, err := tp.ReadLine()
-		if len(kv) == 0 {
-			return m, err
-		}
-
-		// Process key fetching original case.
-		i := bytes.IndexByte([]byte(kv), ':')
-		if i < 0 {
-			return nil, nats.ErrBadHeaderMsg
-		}
-		key := kv[:i]
-		if key == "" {
-			// Skip empty keys.
-			continue
-		}
-		i++
-		for i < len(kv) && (kv[i] == ' ' || kv[i] == '\t') {
-			i++
-		}
-		value := string(kv[i:])
-		m[key] = append(m[key], value)
-		if err != nil {
-			return m, err
-		}
-	}
-}
-
-type pubData struct {
-	Cnt       int
-	Count     int
-	Unix      int64
-	UnixNano  int64
-	TimeStamp string
-	Time      string
-	Request   string
-}
-
-func (p *pubData) ID() string {
-	return nuid.Next()
-}
-
-func pubReplyBodyTemplate(body string, request string, ctr int) ([]byte, error) {
-	now := time.Now()
-	funcMap := template.FuncMap{
-		"Random":    randomString,
-		"Count":     func() int { return ctr },
-		"Cnt":       func() int { return ctr },
-		"Unix":      func() int64 { return now.Unix() },
-		"UnixNano":  func() int64 { return now.UnixNano() },
-		"TimeStamp": func() string { return now.Format(time.RFC3339) },
-		"Time":      func() string { return now.Format(time.Kitchen) },
-		"ID":        func() string { return nuid.Next() },
-	}
-
-	if request != "" {
-		funcMap["Request"] = func() string { return request }
-	}
-
-	templ, err := template.New("body").Funcs(funcMap).Parse(body)
-	if err != nil {
-		return []byte(body), err
-	}
-
-	var b bytes.Buffer
-	err = templ.Execute(&b, &pubData{
-		Cnt:       ctr,
-		Count:     ctr,
-		Unix:      now.Unix(),
-		UnixNano:  now.UnixNano(),
-		TimeStamp: now.Format(time.RFC3339),
-		Time:      now.Format(time.Kitchen),
-		Request:   request,
-	})
-	if err != nil {
-		return []byte(body), err
-	}
-
-	return b.Bytes(), nil
-}
-
-var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-var passwordRunes = append(letterRunes, []rune("@#_-%^&()")...)
-
-func randomPassword(length int) string {
-	b := make([]rune, length)
-	for i := range b {
-		b[i] = passwordRunes[rand.Intn(len(passwordRunes))]
-	}
-
-	return string(b)
-}
-
-func randomString(shortest uint, longest uint) string {
-	if shortest > longest {
-		shortest, longest = longest, shortest
-	}
-
-	var desired int
-
-	switch {
-	case int(longest)-int(shortest) < 0:
-		desired = int(shortest) + rand.Intn(int(longest))
-	case longest == shortest:
-		desired = int(shortest)
-	default:
-		desired = int(shortest) + rand.Intn(int(longest-shortest))
-	}
-
-	b := make([]rune, desired)
-	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
-	}
-
-	return string(b)
-}
-
-func parseStringsToHeader(hdrs []string, seq int) (nats.Header, error) {
-	res := nats.Header{}
-
-	for _, hdr := range hdrs {
-		parts := strings.SplitN(hdr, ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid header %q", hdr)
-		}
-
-		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), "", seq)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse Header template for %s: %s", parts[0], err)
-		}
-
-		res.Add(strings.TrimSpace(parts[0]), string(val))
-	}
-
-	return res, nil
-}
-
-func parseStringsToMsgHeader(hdrs []string, seq int, msg *nats.Msg) error {
-	for _, hdr := range hdrs {
-		parts := strings.SplitN(hdr, ":", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid header %q", hdr)
-		}
-
-		val, err := pubReplyBodyTemplate(strings.TrimSpace(parts[1]), "", seq)
-		if err != nil {
-			log.Printf("Failed to parse Header template for %s: %s", parts[0], err)
-			continue
-		}
-
-		msg.Header.Add(strings.TrimSpace(parts[0]), string(val))
-	}
-
-	return nil
-}
-
-func loadContext() error {
 	ctxOpts := []natscontext.Option{
 		natscontext.WithServerURL(opts.Servers),
 		natscontext.WithCreds(opts.Creds),
@@ -721,10 +478,24 @@ func loadContext() error {
 		natscontext.WithCertificate(opts.TlsCert),
 		natscontext.WithKey(opts.TlsKey),
 		natscontext.WithCA(opts.TlsCA),
+		natscontext.WithWindowsCertStore(opts.WinCertStoreType),
+		natscontext.WithWindowsCertStoreMatch(opts.WinCertStoreMatch),
+		natscontext.WithWindowsCertStoreMatchBy(opts.WinCertStoreMatchBy),
+		natscontext.WithWindowsCaCertsMatch(opts.WinCertCaStoreMatch...),
+		natscontext.WithSocksProxy(opts.SocksProxy),
 		natscontext.WithJSEventPrefix(opts.JsEventPrefix),
 		natscontext.WithJSAPIPrefix(opts.JsApiPrefix),
 		natscontext.WithJSDomain(opts.JsDomain),
 		natscontext.WithInboxPrefix(opts.InboxPrefix),
+		natscontext.WithColorScheme(opts.ColorScheme),
+	}
+
+	if opts.TlsFirst {
+		ctxOpts = append(ctxOpts, natscontext.WithTLSHandshakeFirst())
+	}
+
+	if opts.Token != "" {
+		ctxOpts = append(ctxOpts, natscontext.WithToken(opts.Token))
 	}
 
 	if opts.Username != "" && opts.Password == "" {
@@ -735,7 +506,7 @@ func loadContext() error {
 
 	var err error
 
-	exist, _ := fileAccessible(opts.CfgCtx)
+	exist, _ := iu.IsFileAccessible(opts.CfgCtx)
 
 	if exist && strings.HasSuffix(opts.CfgCtx, ".json") {
 		opts.Config, err = natscontext.NewFromFile(opts.CfgCtx, ctxOpts...)
@@ -743,31 +514,11 @@ func loadContext() error {
 		opts.Config, err = natscontext.New(opts.CfgCtx, !SkipContexts, ctxOpts...)
 	}
 
+	if err != nil && softFail {
+		opts.Config, err = natscontext.New(opts.CfgCtx, false, ctxOpts...)
+	}
+
 	return err
-}
-
-func fileAccessible(f string) (bool, error) {
-	stat, err := os.Stat(f)
-	if err != nil {
-		return false, err
-	}
-
-	if stat.IsDir() {
-		return false, fmt.Errorf("is a directory")
-	}
-
-	file, err := os.Open(f)
-	if err != nil {
-		return false, err
-	}
-	file.Close()
-
-	return true, nil
-}
-
-func isJsonString(s string) bool {
-	trimmed := strings.TrimSpace(s)
-	return strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")
 }
 
 func renderCluster(cluster *api.ClusterInfo) string {
@@ -800,7 +551,7 @@ func renderCluster(cluster *api.ClusterInfo) string {
 	}
 
 	// now we compact that list of hostnames and apply styling * and ! to the leader and down ones
-	compact := compactStrings(peers)
+	compact := iu.CompactStrings(peers)
 	if leader != -1 {
 		compact[0] = compact[0] + "*"
 	}
@@ -809,35 +560,50 @@ func renderCluster(cluster *api.ClusterInfo) string {
 	}
 	sort.Strings(compact)
 
-	return strings.Join(compact, ", ")
+	return f(compact)
 }
 
+// doReqAsync serializes and sends a request to the given subject and handles multiple responses.
+// This function uses the value from `Timeout` CLI flag as upper limit for responses gathering.
+// The value of the `waitFor` may shorten the interval during which responses are gathered:
+//
+//	waitFor < 0  : listen for responses for the full timeout interval
+//	waitFor == 0 : (adaptive timeout), after each response, wait a short amount of time for more, then stop
+//	waitFor > 0  : stops listening before the timeout if the given number of responses are received
 func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte)) error {
 	jreq := []byte("{}")
 	var err error
 
 	if req != nil {
-		jreq, err = json.MarshalIndent(req, "", "  ")
-		if err != nil {
-			return err
+		switch val := req.(type) {
+		case string:
+			jreq = []byte(val)
+		default:
+			jreq, err = json.Marshal(req)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
-	if opts.Trace {
+	if opts().Trace {
 		log.Printf(">>> %s: %s\n", subj, string(jreq))
 	}
 
 	var (
-		mu  sync.Mutex
-		ctr = 0
+		mu       sync.Mutex
+		ctr      = 0
+		finisher *time.Timer
 	)
 
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	// Set deadline, max amount of time this function waits for responses
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
 	defer cancel()
 
-	var finisher *time.Timer
+	// Activate "adaptive timeout". Finisher may trigger early termination
 	if waitFor == 0 {
-		finisher = time.NewTimer(300 * time.Millisecond)
+		// First response can take up to Timeout to arrive
+		finisher = time.NewTimer(opts().Timeout)
 		go func() {
 			select {
 			case <-finisher.C:
@@ -865,7 +631,7 @@ func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte
 			data = ud
 		}
 
-		if opts.Trace {
+		if opts().Trace {
 			if compressed {
 				log.Printf("<<< (%dB -> %dB) %s", len(m.Data), len(data), string(data))
 			} else {
@@ -877,7 +643,9 @@ func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte
 			}
 		}
 
+		// If adaptive timeout is active, set deadline for next response
 		if finisher != nil {
+			// Stop listening and return if no further responses arrive within this interval
 			finisher.Reset(300 * time.Millisecond)
 		}
 
@@ -889,6 +657,7 @@ func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte
 		cb(data)
 		ctr++
 
+		// Stop listening if the requested number of responses have been received
 		if waitFor > 0 && ctr == waitFor {
 			cancel()
 		}
@@ -904,7 +673,7 @@ func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte
 
 	msg := nats.NewMsg(subj)
 	msg.Data = jreq
-	if subj != "$SYS.REQ.SERVER.PING" {
+	if subj != "$SYS.REQ.SERVER.PING" && !strings.HasPrefix(subj, "$SYS.REQ.ACCOUNT") {
 		msg.Header.Set("Accept-Encoding", "snappy")
 	}
 	msg.Reply = sub.Subject
@@ -916,15 +685,16 @@ func doReqAsync(req any, subj string, waitFor int, nc *nats.Conn, cb func([]byte
 
 	select {
 	case err = <-errs:
-		if err == nats.ErrNoResponders {
+		if err == nats.ErrNoResponders && strings.HasPrefix(subj, "$SYS") {
 			return fmt.Errorf("server request failed, ensure the account used has system privileges and appropriate permissions")
 		}
+
 		return err
 	case <-ctx.Done():
 	}
 
-	if opts.Trace {
-		log.Printf(">>> Received %d responses", ctr)
+	if opts().Trace {
+		log.Printf("=== Received %d responses", ctr)
 	}
 
 	return nil
@@ -950,8 +720,7 @@ type raftLeader struct {
 }
 
 func renderRaftLeaders(leaders map[string]*raftLeader, grpTitle string) {
-	table := tablewriter.CreateTable()
-	table.AddTitle("RAFT Leader Report")
+	table := iu.NewTableWriter(opts(), "RAFT Leader Report")
 	table.AddHeaders("Server", "Cluster", grpTitle, "Distribution")
 
 	var llist []*raftLeader
@@ -989,172 +758,124 @@ func renderRaftLeaders(leaders map[string]*raftLeader, grpTitle string) {
 		if dots <= 0 {
 			dots = 1
 		}
-		table.AddRow(l.name, l.cluster, humanize.Comma(int64(l.groups)), strings.Repeat("*", dots))
+		table.AddRow(l.name, l.cluster, f(l.groups), strings.Repeat("*", dots))
 	}
 	fmt.Println(table.Render())
-}
-
-func compactStrings(source []string) []string {
-	if len(source) == 0 {
-		return source
-	}
-
-	hnParts := make([][]string, len(source))
-	shortest := math.MaxInt8
-
-	for i, name := range source {
-		hnParts[i] = strings.Split(name, ".")
-		if len(hnParts[i]) < shortest {
-			shortest = len(hnParts[i])
-		}
-	}
-
-	toRemove := ""
-
-	// we dont chop the 0 item off
-	for i := shortest - 1; i > 0; i-- {
-		s := hnParts[0][i]
-
-		remove := true
-		for _, name := range hnParts {
-			if name[i] != s {
-				remove = false
-				break
-			}
-		}
-
-		if remove {
-			toRemove = "." + s + toRemove
-		} else {
-			break
-		}
-	}
-
-	result := make([]string, len(source))
-	for i, name := range source {
-		result[i] = strings.TrimSuffix(name, toRemove)
-	}
-
-	return result
-}
-
-func newTableWriter(title string) *tablewriter.Table {
-	table := tablewriter.CreateTable()
-	table.UTF8Box()
-	if title != "" {
-		table.AddTitle(title)
-	}
-
-	return table
-}
-
-func isPrintable(s string) bool {
-	for _, r := range s {
-		if r > unicode.MaxASCII || !unicode.IsPrint(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func base64IfNotPrintable(val []byte) string {
-	if isPrintable(string(val)) {
-		return string(val)
-	}
-
-	return base64.StdEncoding.EncodeToString(val)
 }
 
 // io.Reader / io.Writer that updates progress bar
 type progressRW struct {
 	r io.Reader
 	w io.Writer
-	p *uiprogress.Bar
+	p progress.Writer
+	t *progress.Tracker
 }
 
 func (pr *progressRW) Read(p []byte) (n int, err error) {
 	n, err = pr.r.Read(p)
-	pr.p.Set(pr.p.Current() + n)
+	pr.t.Increment(int64(n))
 
 	return n, err
 }
 
 func (pr *progressRW) Write(p []byte) (n int, err error) {
 	n, err = pr.w.Write(p)
-	pr.p.Set(pr.p.Current() + n)
+	pr.t.Increment(int64(n))
 	return n, err
 }
 
-var bytesUnitSplitter = regexp.MustCompile(`^(\d+)(\w+)`)
-var errInvalidByteString = errors.New("bytes must end in K, KB, M, MB, G, GB, T or TB")
-
-// nats-server derived string parse, empty string and any negative is -1,
-// others are parsed as 1024 based bytes
-func parseStringAsBytes(s string) (int64, error) {
-	if s == "" {
-		return -1, nil
+func outPutMSGBodyCompact(data []byte, filter string, subject string, stream string) (string, error) {
+	if len(data) == 0 && filter == "" {
+		fmt.Println("nil body")
+		return "", nil
 	}
 
-	s = strings.TrimSpace(s)
-
-	if strings.HasPrefix(s, "-") {
-		return -1, nil
-	}
-
-	// first we try just parsing it to handle numbers without units
-	num, err := strconv.ParseInt(s, 10, 64)
-	if err == nil {
-		if num < 0 {
-			return -1, nil
-		}
-		return num, nil
-	}
-
-	matches := bytesUnitSplitter.FindStringSubmatch(s)
-
-	if len(matches) == 0 {
-		return 0, fmt.Errorf("invalid bytes specification %v: %w", s, errInvalidByteString)
-	}
-
-	num, err = strconv.ParseInt(matches[1], 10, 64)
+	data, err := filterDataThroughCmd(data, filter, subject, stream)
 	if err != nil {
-		return 0, err
+		// using q here so raw binary data will be escaped
+		fmt.Printf("%q\nError while translating msg body: %s\n\n", data, err.Error())
+		return "", err
+	}
+	output := string(data)
+	if strings.HasSuffix(output, "\n") {
+		fmt.Print(output)
+	} else {
+		fmt.Println(output)
 	}
 
-	suffix := matches[2]
-	suffixMap := map[string]int64{"K": 10, "KB": 10, "KIB": 10, "M": 20, "MB": 20, "MIB": 20, "G": 30, "GB": 30, "GIB": 30, "T": 40, "TB": 40, "TIB": 40}
-
-	mult, ok := suffixMap[strings.ToUpper(suffix)]
-	if !ok {
-		return 0, fmt.Errorf("invalid bytes specification %v: %w", s, errInvalidByteString)
-	}
-	num *= 1 << mult
-
-	return num, nil
+	return output, nil
 }
 
-func sliceGroups(input []string, size int, fn func(group []string)) {
-	// how many to add
-	padding := size - (len(input) % size)
-
-	if padding != size {
-		p := []string{}
-
-		for i := 0; i <= padding; i++ {
-			p = append(p, "")
-		}
-
-		input = append(input, p...)
+func outPutMSGBody(data []byte, filter string, subject string, stream string) {
+	output, err := outPutMSGBodyCompact(data, filter, subject, stream)
+	if err != nil {
+		return
 	}
 
-	// how many chunks we're making
-	count := len(input) / size
+	fmt.Println()
 
-	for i := 0; i < count; i++ {
-		chunk := []string{}
-		for s := 0; s < size; s++ {
-			chunk = append(chunk, input[i+s*count])
-		}
-		fn(chunk)
+	if !strings.HasSuffix(output, "\n") {
+		fmt.Println()
 	}
+}
+
+func filterDataThroughCmd(data []byte, filter, subject, stream string) ([]byte, error) {
+	if filter == "" {
+		return data, nil
+	}
+	funcMap := template.FuncMap{
+		"Subject": func() string { return subject },
+		"Stream":  func() string { return stream },
+	}
+
+	tmpl, err := template.New("translate").Funcs(funcMap).Parse(filter)
+	if err != nil {
+		return nil, err
+	}
+	var builder strings.Builder
+	err = tmpl.Execute(&builder, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	parts, err := shlex.Split(builder.String())
+	if err != nil {
+		return nil, fmt.Errorf("the filter command line could not be parsed: %w", err)
+	}
+	cmd := parts[0]
+	args := parts[1:]
+
+	runner := exec.Command(cmd, args...)
+	// pass the message as string to stdin
+	runner.Stdin = bytes.NewReader(data)
+	// maybe we want to do something on error?
+	return runner.CombinedOutput()
+}
+
+// currentActiveServers determines how many servers the connected server knows about
+func currentActiveServers(nc *nats.Conn) (int, error) {
+	var expect int
+
+	err := doReqAsync(nil, "$SYS.REQ.SERVER.PING", 1, nc, func(msg []byte) {
+		var res server.ServerStatsMsg
+
+		err := json.Unmarshal(msg, &res)
+		if err != nil {
+			return
+		}
+
+		expect = res.Stats.ActiveServers
+	})
+
+	return expect, err
+}
+
+func calculateRate(new, last float64, since time.Duration) float64 {
+	// If new == 0 we have missed a data point from nats.
+	// Return the previous calculation so that it doesn't break graphs
+	if new == 0 {
+		return last
+	}
+
+	return (new - last) / since.Seconds()
 }

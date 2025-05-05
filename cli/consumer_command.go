@@ -1,4 +1,4 @@
-// Copyright 2019 The NATS Authors
+// Copyright 2019-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,40 +14,54 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nats-io/natscli/columns"
+	"github.com/nats-io/natscli/internal/asciigraph"
+	iu "github.com/nats-io/natscli/internal/util"
+	terminal "golang.org/x/term"
+	"gopkg.in/yaml.v3"
+
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/google/go-cmp/cmp"
 	"github.com/nats-io/jsm.go/api"
+	"github.com/nats-io/jsm.go/balancer"
 	"github.com/nats-io/nats.go"
 
 	"github.com/nats-io/jsm.go"
 )
 
 type consumerCmd struct {
-	consumer    string
-	stream      string
-	json        bool
-	listNames   bool
-	force       bool
-	ack         bool
-	raw         bool
-	destination string
-	inputFile   string
-	outFile     string
-	showAll     bool
+	consumer       string
+	stream         string
+	json           bool
+	listNames      bool
+	force          bool
+	ack            bool
+	ackSetByUser   bool
+	term           bool
+	raw            bool
+	destination    string
+	inputFile      string
+	outFile        string
+	showAll        bool
+	acceptDefaults bool
+	showStateOnly  bool
 
 	selectedConsumer *jsm.Consumer
 
@@ -56,7 +70,7 @@ type consumerCmd struct {
 	bpsRateLimit        uint64
 	delivery            string
 	ephemeral           bool
-	filterSubject       string
+	filterSubjects      []string
 	idleHeartbeat       string
 	maxAckPending       int
 	maxDeliver          int
@@ -84,18 +98,41 @@ type consumerCmd struct {
 	hdrsOnlySet         bool
 	fc                  bool
 	fcSet               bool
+	metadataIsSet       bool
+	metadata            map[string]string
+	pauseUntil          string
 
-	dryRun bool
-	mgr    *jsm.Manager
-	nc     *nats.Conn
+	dryRun             bool
+	mgr                *jsm.Manager
+	nc                 *nats.Conn
+	nak                bool
+	fPull              bool
+	fPush              bool
+	fBound             bool
+	fWaiting           int
+	fAckPending        int
+	fPending           uint64
+	fIdle              time.Duration
+	fCreated           time.Duration
+	fReplicas          uint
+	fInvert            bool
+	fExpression        string
+	fLeader            string
+	interactive        bool
+	pinnedGroups       []string
+	pinnedTTL          time.Duration
+	overflowGroups     []string
+	groupName          string
+	fPinned            bool
+	placementPreferred string
 }
 
 func configureConsumerCommand(app commandHost) {
-	c := &consumerCmd{}
+	c := &consumerCmd{metadata: map[string]string{}}
 
 	addCreateFlags := func(f *fisk.CmdClause, edit bool) {
 		if !edit {
-			f.Flag("ack", "Acknowledgement policy (none, all, explicit)").StringVar(&c.ackPolicy)
+			f.Flag("ack", "Acknowledgment policy (none, all, explicit)").StringVar(&c.ackPolicy)
 			f.Flag("bps", "Restrict message delivery to a certain bit per second").Default("0").Uint64Var(&c.bpsRateLimit)
 		}
 		f.Flag("backoff", "Creates a consumer backoff policy using a specific pre-written algorithm (none, linear)").PlaceHolder("MODE").EnumVar(&c.backoffMode, "linear", "none")
@@ -110,7 +147,7 @@ func configureConsumerCommand(app commandHost) {
 		if !edit {
 			f.Flag("ephemeral", "Create an ephemeral Consumer").UnNegatableBoolVar(&c.ephemeral)
 		}
-		f.Flag("filter", "Filter Stream by subjects").Default("_unset_").StringVar(&c.filterSubject)
+		f.Flag("filter", "Filter Stream by subjects").PlaceHolder("SUBJECTS").StringsVar(&c.filterSubjects)
 		if !edit {
 			f.Flag("flow-control", "Enable Push consumer flow control").IsSetByUser(&c.fcSet).UnNegatableBoolVar(&c.fc)
 			f.Flag("heartbeat", "Enable idle Push consumer heartbeats (-1 disable)").StringVar(&c.idleHeartbeat)
@@ -118,9 +155,11 @@ func configureConsumerCommand(app commandHost) {
 
 		f.Flag("headers-only", "Deliver only headers and no bodies").IsSetByUser(&c.hdrsOnlySet).BoolVar(&c.hdrsOnly)
 		f.Flag("max-deliver", "Maximum amount of times a message will be delivered").PlaceHolder("TRIES").IntVar(&c.maxDeliver)
-		f.Flag("max-outstanding", "Maximum pending Acks before consumers are paused").Hidden().Default("-1").IntVar(&c.maxAckPending)
+		f.Flag("max-outstanding", "Maximum pending Acks before consumers stop delivering messages").Hidden().Default("-1").IntVar(&c.maxAckPending)
 		f.Flag("max-pending", "Maximum pending Acks before consumers are paused").Default("-1").IntVar(&c.maxAckPending)
-		f.Flag("max-waiting", "Maximum number of outstanding pulls allowed").PlaceHolder("PULLS").IntVar(&c.maxWaiting)
+		if !edit {
+			f.Flag("max-waiting", "Maximum number of outstanding pulls allowed").PlaceHolder("PULLS").IntVar(&c.maxWaiting)
+		}
 		f.Flag("max-pull-batch", "Maximum size batch size for a pull request to accept").PlaceHolder("BATCH_SIZE").IntVar(&c.maxPullBatch)
 		f.Flag("max-pull-expire", "Maximum expire duration for a pull request to accept").PlaceHolder("EXPIRES").DurationVar(&c.maxPullExpire)
 		f.Flag("max-pull-bytes", "Maximum max bytes for a pull request to accept").PlaceHolder("BYTES").IntVar(&c.maxPullBytes)
@@ -130,32 +169,24 @@ func configureConsumerCommand(app commandHost) {
 		}
 		f.Flag("sample", "Percentage of requests to sample for monitoring purposes").Default("-1").IntVar(&c.samplePct)
 		f.Flag("target", "Push based delivery target subject").PlaceHolder("SUBJECT").StringVar(&c.delivery)
-		f.Flag("wait", "Acknowledgement waiting time").Default("-1s").DurationVar(&c.ackWait)
+		f.Flag("wait", "Acknowledgment waiting time").Default("-1s").DurationVar(&c.ackWait)
+		f.Flag("inactive-threshold", "How long to allow an ephemeral consumer to be idle before removing it").PlaceHolder("THRESHOLD").DurationVar(&c.inactiveThreshold)
 		if !edit {
-			f.Flag("inactive-threshold", "How long to allow an ephemeral consumer to be idle before removing it").PlaceHolder("THRESHOLD").DurationVar(&c.inactiveThreshold)
-			f.Flag("replicas", "Sets a custom replica count rather than inherit from the stream").IntVar(&c.replicas)
 			f.Flag("memory", "Force the consumer state to be stored in memory rather than inherit from the stream").UnNegatableBoolVar(&c.memory)
+		}
+		f.Flag("replicas", "Sets a custom replica count rather than inherit from the stream").IntVar(&c.replicas)
+		f.Flag("metadata", "Adds metadata to the consumer").PlaceHolder("META").IsSetByUser(&c.metadataIsSet).StringMapVar(&c.metadata)
+		if !edit {
+			f.Flag("pause", fmt.Sprintf("Pause the consumer for a duration after start or until a specific timestamp (eg %s)", time.Now().Format(time.DateTime))).StringVar(&c.pauseUntil)
+			f.Flag("pinned-groups", "Create a Pinned Client consumer based on these groups").StringsVar(&c.pinnedGroups)
+			f.Flag("pinned-ttl", "The time to allow for a client to pull before losing the pinned status").DurationVar(&c.pinnedTTL)
+			f.Flag("overflow-groups", "Create a Overflow consumer based on these groups").StringsVar(&c.overflowGroups)
 		}
 	}
 
 	cons := app.Command("consumer", "JetStream Consumer management").Alias("con").Alias("obs").Alias("c")
 	addCheat("consumer", cons)
 	cons.Flag("all", "Operate on all streams including system ones").Short('a').UnNegatableBoolVar(&c.showAll)
-
-	consLs := cons.Command("ls", "List known Consumers").Alias("list").Action(c.lsAction)
-	consLs.Arg("stream", "Stream name").StringVar(&c.stream)
-	consLs.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
-	consLs.Flag("names", "Show just the consumer names").Short('n').UnNegatableBoolVar(&c.listNames)
-
-	conReport := cons.Command("report", "Reports on Consumer statistics").Action(c.reportAction)
-	conReport.Arg("stream", "Stream name").StringVar(&c.stream)
-	conReport.Flag("raw", "Show un-formatted numbers").Short('r').UnNegatableBoolVar(&c.raw)
-	conReport.Flag("leaders", "Show details about the leaders").Short('l').UnNegatableBoolVar(&c.reportLeaderDistrib)
-
-	consInfo := cons.Command("info", "Consumer information").Alias("nfo").Action(c.infoAction)
-	consInfo.Arg("stream", "Stream name").StringVar(&c.stream)
-	consInfo.Arg("consumer", "Consumer name").StringVar(&c.consumer)
-	consInfo.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
 
 	consAdd := cons.Command("add", "Creates a new Consumer").Alias("create").Alias("new").Action(c.createAction)
 	consAdd.Arg("stream", "Stream name").StringVar(&c.stream)
@@ -164,14 +195,50 @@ func configureConsumerCommand(app commandHost) {
 	consAdd.Flag("validate", "Only validates the configuration against the official Schema").UnNegatableBoolVar(&c.validateOnly)
 	consAdd.Flag("output", "Save configuration instead of creating").PlaceHolder("FILE").StringVar(&c.outFile)
 	addCreateFlags(consAdd, false)
+	consAdd.Flag("defaults", "Accept default values for all prompts").UnNegatableBoolVar(&c.acceptDefaults)
 
-	edit := cons.Command("edit", "Edits the configuration of a consumer").Action(c.editAction)
+	edit := cons.Command("edit", "Edits the configuration of a consumer").Alias("update").Action(c.editAction)
 	edit.Arg("stream", "Stream name").StringVar(&c.stream)
 	edit.Arg("consumer", "Consumer name").StringVar(&c.consumer)
 	edit.Flag("config", "JSON file to read configuration from").ExistingFileVar(&c.inputFile)
 	edit.Flag("force", "Force removal without prompting").Short('f').UnNegatableBoolVar(&c.force)
+	edit.Flag("interactive", "Edit the configuring using your editor").Short('i').BoolVar(&c.interactive)
 	edit.Flag("dry-run", "Only shows differences, do not edit the stream").UnNegatableBoolVar(&c.dryRun)
 	addCreateFlags(edit, true)
+
+	consLs := cons.Command("ls", "List known Consumers").Alias("list").Action(c.lsAction)
+	consLs.Arg("stream", "Stream name").StringVar(&c.stream)
+	consLs.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	consLs.Flag("names", "Show just the consumer names").Short('n').UnNegatableBoolVar(&c.listNames)
+	consLs.Flag("no-select", "Do not select consumers from a list").Default("false").UnNegatableBoolVar(&c.force)
+
+	consFind := cons.Command("find", "Finds consumers matching certain criteria").Alias("query").Action(c.findAction)
+	consFind.Arg("stream", "Stream name").StringVar(&c.stream)
+	consFind.Flag("pull", "Display only pull based consumers").UnNegatableBoolVar(&c.fPull)
+	consFind.Flag("push", "Display only push based consumers").UnNegatableBoolVar(&c.fPush)
+	consFind.Flag("bound", "Display push-bound or pull consumers with waiting pulls").UnNegatableBoolVar(&c.fBound)
+	consFind.Flag("waiting", "Display consumers with fewer waiting pulls").IntVar(&c.fWaiting)
+	consFind.Flag("ack-pending", "Display consumers with fewer pending acks").IntVar(&c.fAckPending)
+	consFind.Flag("pending", "Display consumers with fewer unprocessed messages").Uint64Var(&c.fPending)
+	consFind.Flag("idle", "Display consumers with no new deliveries for a period").DurationVar(&c.fIdle)
+	consFind.Flag("created", "Display consumers created longer ago than duration").PlaceHolder("DURATION").DurationVar(&c.fCreated)
+	consFind.Flag("replicas", "Display consumers with fewer or equal replicas than the value").PlaceHolder("REPLICAS").UintVar(&c.fReplicas)
+	consFind.Flag("leader", "Display only clustered streams with a specific leader").PlaceHolder("SERVER").StringVar(&c.fLeader)
+	consFind.Flag("pinned", "Finds Pinned Client priority group consumers that are fully pinned").UnNegatableBoolVar(&c.fPinned)
+	consFind.Flag("invert", "Invert the check - before becomes after, with becomes without").BoolVar(&c.fInvert)
+	consFind.Flag("expression", "Match consumers using an expression language").StringVar(&c.fExpression)
+
+	consInfo := cons.Command("info", "Consumer information").Alias("nfo").Action(c.infoAction)
+	consInfo.Arg("stream", "Stream name").StringVar(&c.stream)
+	consInfo.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+	consInfo.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	consInfo.Flag("no-select", "Do not select consumers from a list").Default("false").UnNegatableBoolVar(&c.force)
+
+	consState := cons.Command("state", "Stream state").Action(c.stateAction)
+	consState.Arg("stream", "Stream to retrieve state information for").StringVar(&c.stream)
+	consState.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+	consState.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
+	consState.Flag("no-select", "Do not select streams from a list").Default("false").UnNegatableBoolVar(&c.force)
 
 	consRm := cons.Command("rm", "Removes a Consumer").Alias("delete").Alias("del").Action(c.rmAction)
 	consRm.Arg("stream", "Stream name").StringVar(&c.stream)
@@ -187,29 +254,422 @@ func configureConsumerCommand(app commandHost) {
 	consNext := cons.Command("next", "Retrieves messages from Pull Consumers without interactive prompts").Action(c.nextAction)
 	consNext.Arg("stream", "Stream name").Required().StringVar(&c.stream)
 	consNext.Arg("consumer", "Consumer name").Required().StringVar(&c.consumer)
-	consNext.Flag("ack", "Acknowledge received message").Default("true").BoolVar(&c.ack)
+	consNext.Flag("ack", "Acknowledge received message").Default("true").IsSetByUser(&c.ackSetByUser).BoolVar(&c.ack)
+	consNext.Flag("nak", "Perform a Negative Acknowledgement on the message").UnNegatableBoolVar(&c.nak)
+	consNext.Flag("term", "Terms the message").Default("false").UnNegatableBoolVar(&c.term)
 	consNext.Flag("raw", "Show only the message").Short('r').UnNegatableBoolVar(&c.raw)
 	consNext.Flag("wait", "Wait up to this period to acknowledge messages").DurationVar(&c.ackWait)
 	consNext.Flag("count", "Number of messages to try to fetch from the pull consumer").Default("1").IntVar(&c.pullCount)
 
-	consSub := cons.Command("sub", "Retrieves messages from Consumers").Action(c.subAction)
+	consSub := cons.Command("sub", "Retrieves messages from Consumers").Action(c.subAction).Hidden()
 	consSub.Arg("stream", "Stream name").StringVar(&c.stream)
 	consSub.Arg("consumer", "Consumer name").StringVar(&c.consumer)
 	consSub.Flag("ack", "Acknowledge received message").Default("true").BoolVar(&c.ack)
 	consSub.Flag("raw", "Show only the message").Short('r').UnNegatableBoolVar(&c.raw)
 	consSub.Flag("deliver-group", "Deliver group of the consumer").StringVar(&c.deliveryGroup)
 
+	graph := cons.Command("graph", "View a graph of Consumer activity").Action(c.graphAction)
+	graph.Arg("stream", "Stream name").StringVar(&c.stream)
+	graph.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+
+	conPause := cons.Command("pause", "Pause a consumer until a later time").Action(c.pauseAction)
+	conPause.Arg("stream", "Stream name").StringVar(&c.stream)
+	conPause.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+	conPause.Arg("until", fmt.Sprintf("Pause until a specific time (eg %s)", time.Now().UTC().Format(time.DateTime))).PlaceHolder("TIME").StringVar(&c.pauseUntil)
+	conPause.Flag("force", "Force pause without prompting").Short('f').UnNegatableBoolVar(&c.force)
+
+	conUnpin := cons.Command("unpin", "Unpin the current Pinned Client from a Priority Group").Action(c.unpinAction)
+	conUnpin.Arg("stream", "Stream name").StringVar(&c.stream)
+	conUnpin.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+	conUnpin.Arg("group", "The group to unpin").StringVar(&c.groupName)
+	conUnpin.Flag("force", "Force unpin without prompting").Short('f').UnNegatableBoolVar(&c.force)
+
+	conResume := cons.Command("resume", "Resume a paused consumer").Action(c.resumeAction)
+	conResume.Arg("stream", "Stream name").StringVar(&c.stream)
+	conResume.Arg("consumer", "Consumer name").StringVar(&c.consumer)
+	conResume.Flag("force", "Force resume without prompting").Short('f').UnNegatableBoolVar(&c.force)
+
+	conReport := cons.Command("report", "Reports on Consumer statistics").Action(c.reportAction)
+	conReport.Arg("stream", "Stream name").StringVar(&c.stream)
+	conReport.Flag("raw", "Show un-formatted numbers").Short('r').UnNegatableBoolVar(&c.raw)
+	conReport.Flag("leaders", "Show details about the leaders").Short('l').UnNegatableBoolVar(&c.reportLeaderDistrib)
+
 	conCluster := cons.Command("cluster", "Manages a clustered Consumer").Alias("c")
-	conClusterDown := conCluster.Command("step-down", "Force a new leader election by standing down the current leader").Alias("elect").Alias("down").Alias("d").Action(c.leaderStandDown)
+	conClusterDown := conCluster.Command("step-down", "Force a new leader election by standing down the current leader").Alias("elect").Alias("down").Alias("d").Action(c.leaderStandDownAction)
 	conClusterDown.Arg("stream", "Stream to act on").StringVar(&c.stream)
 	conClusterDown.Arg("consumer", "Consumer to act on").StringVar(&c.consumer)
+	conClusterDown.Flag("preferred", "Prefer placing the leader on a specific host").StringVar(&c.placementPreferred)
+	conClusterDown.Flag("force", "Force leader step down ignoring current leader").Short('f').UnNegatableBoolVar(&c.force)
+
+	conClusterBalance := conCluster.Command("balance", "Balance consumer leaders").Action(c.balanceAction)
+	conClusterBalance.Arg("stream", "Stream to act on").StringVar(&c.stream)
+	conClusterBalance.Flag("pull", "Balance only pull based consumers").UnNegatableBoolVar(&c.fPull)
+	conClusterBalance.Flag("push", "Balance only push based consumers").UnNegatableBoolVar(&c.fPush)
+	conClusterBalance.Flag("bound", "Balance push-bound or pull consumers with waiting pulls").UnNegatableBoolVar(&c.fBound)
+	conClusterBalance.Flag("waiting", "Balance consumers with fewer waiting pulls").IntVar(&c.fWaiting)
+	conClusterBalance.Flag("ack-pending", "Balance consumers with fewer pending acks").IntVar(&c.fAckPending)
+	conClusterBalance.Flag("pending", "Balance consumers with fewer unprocessed messages").Uint64Var(&c.fPending)
+	conClusterBalance.Flag("idle", "Balance consumers with no new deliveries for a period").DurationVar(&c.fIdle)
+	conClusterBalance.Flag("created", "Balance consumers created longer ago than duration").PlaceHolder("DURATION").DurationVar(&c.fCreated)
+	conClusterBalance.Flag("replicas", "Balance consumers with fewer or equal replicas than the value").PlaceHolder("REPLICAS").UintVar(&c.fReplicas)
+	conClusterBalance.Flag("leader", "Balance only clustered streams with a specific leader").PlaceHolder("SERVER").StringVar(&c.fLeader)
+	conClusterBalance.Flag("pinned", "Balance Pinned Client priority group consumers that are fully pinned").UnNegatableBoolVar(&c.fPinned)
+	conClusterBalance.Flag("invert", "Invert the check - before becomes after, with becomes without").BoolVar(&c.fInvert)
+	conClusterBalance.Flag("expression", "Balance matching consumers using an expression language").StringVar(&c.fExpression)
+
 }
 
 func init() {
 	registerCommand("consumer", 4, configureConsumerCommand)
 }
 
-func (c *consumerCmd) leaderStandDown(_ *fisk.ParseContext) error {
+func (c *consumerCmd) unpinAction(_ *fisk.ParseContext) error {
+	c.connectAndSetup(true, true)
+
+	if !c.selectedConsumer.IsPinnedClientPriority() {
+		return fmt.Errorf("consumer is not a pinned priority consumer")
+	}
+
+	nfo, err := c.selectedConsumer.State()
+	if err != nil {
+		return err
+	}
+
+	matched := map[string]api.PriorityGroupState{}
+	var groups []string
+	for _, v := range nfo.PriorityGroups {
+		if v.PinnedClientID != "" {
+			matched[v.Group] = v
+			groups = append(groups, v.Group)
+		}
+	}
+
+	if len(matched) == 0 {
+		return fmt.Errorf("no priority groups have pinned clients")
+	}
+
+	if c.groupName == "" {
+		err = iu.AskOne(&survey.Select{
+			Message:  "Select a Group",
+			Options:  groups,
+			PageSize: iu.SelectPageSize(len(groups)),
+		}, &c.groupName, survey.WithValidator(survey.Required))
+		if err != nil {
+			return err
+		}
+	}
+
+	if !c.force {
+		ok, err := askConfirmation(fmt.Sprintf("Really unpin client from group %s > %s > %s", c.stream, c.consumer, c.groupName), false)
+		fisk.FatalIfError(err, "could not obtain confirmation")
+
+		if !ok {
+			return nil
+		}
+	}
+
+	err = c.selectedConsumer.Unpin(c.groupName)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Unpinned client %s from Priority Group %s > %s > %s\n", matched[c.groupName].PinnedClientID, c.stream, c.consumer, c.groupName)
+
+	return nil
+}
+
+func (c *consumerCmd) findAction(_ *fisk.ParseContext) error {
+	var err error
+	var stream *jsm.Stream
+
+	c.connectAndSetup(true, false)
+
+	c.stream, stream, err = selectStream(c.mgr, c.stream, c.force, c.showAll)
+	if err != nil {
+		return err
+	}
+
+	if stream == nil {
+		return fmt.Errorf("no stream selected")
+	}
+
+	var opts []jsm.ConsumerQueryOpt
+	if c.fPush {
+		opts = append(opts, jsm.ConsumerQueryIsPush())
+	}
+	if c.fPull {
+		opts = append(opts, jsm.ConsumerQueryIsPull())
+	}
+	if c.fBound {
+		opts = append(opts, jsm.ConsumerQueryIsBound())
+	}
+	if c.fWaiting > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerWaiting(c.fWaiting))
+	}
+	if c.fAckPending > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerAckPending(c.fAckPending))
+	}
+	if c.fPending > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerPending(c.fPending))
+	}
+	if c.fIdle > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithDeliverySince(c.fIdle))
+	}
+	if c.fCreated > 0 {
+		opts = append(opts, jsm.ConsumerQueryOlderThan(c.fCreated))
+	}
+	if c.fReplicas > 0 {
+		opts = append(opts, jsm.ConsumerQueryReplicas(c.fReplicas))
+	}
+	if c.fInvert {
+		opts = append(opts, jsm.ConsumerQueryInvert())
+	}
+	if c.fExpression != "" {
+		opts = append(opts, jsm.ConsumerQueryExpression(c.fExpression))
+	}
+	if c.fLeader != "" {
+		opts = append(opts, jsm.ConsumerQueryLeaderServer(c.fLeader))
+	}
+	if c.fPinned {
+		opts = append(opts, jsm.ConsumerQueryIsPinned())
+	}
+
+	found, err := stream.QueryConsumers(opts...)
+	if err != nil {
+		return err
+	}
+
+	for _, c := range found {
+		fmt.Println(c.Name())
+	}
+
+	return nil
+}
+
+func (c *consumerCmd) graphAction(_ *fisk.ParseContext) error {
+	if !iu.IsTerminal() {
+		return fmt.Errorf("can only graph data on an interactive terminal")
+	}
+
+	width, height, err := terminal.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to get terminal dimensions: %w", err)
+	}
+
+	if width < 20 || height < 20 {
+		return fmt.Errorf("please increase terminal dimensions")
+	}
+
+	c.connectAndSetup(true, true)
+
+	consumer, err := c.mgr.LoadConsumer(c.stream, c.consumer)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+
+	nfo, err := consumer.State()
+	if err != nil {
+		return err
+	}
+
+	resizeData := func(data []float64, width int) []float64 {
+		if width <= 0 {
+			return data
+		}
+
+		length := len(data)
+
+		if length > width {
+			return data[length-width:]
+		}
+
+		return data
+	}
+
+	deliveredRates := make([]float64, width)
+	ackedRates := make([]float64, width)
+	outstandingMessages := make([]float64, width)
+	unprocessedMessages := make([]float64, width)
+	lastAckedSeq := nfo.AckFloor.Stream
+	lastDeliveredSeq := nfo.Delivered.Stream
+	lastStateTs := time.Now()
+
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			width, height, err = terminal.GetSize(int(os.Stdout.Fd()))
+			if err != nil {
+				height = 40
+				width = 80
+			}
+			if width > 15 {
+				width -= 10
+			}
+			if height > 10 {
+				height -= 5
+			}
+
+			if width < 20 || height < 20 {
+				return fmt.Errorf("please increase terminal dimensions")
+			}
+
+			nfo, err := consumer.State()
+			if err != nil {
+				continue
+			}
+
+			deliveredRates = append(deliveredRates, calculateRate(float64(nfo.Delivered.Stream), float64(lastDeliveredSeq), time.Since(lastStateTs)))
+			ackedRates = append(ackedRates, calculateRate(float64(nfo.AckFloor.Stream), float64(lastAckedSeq), time.Since(lastStateTs)))
+			unprocessedMessages = append(unprocessedMessages, float64(nfo.NumPending))
+			outstandingMessages = append(outstandingMessages, float64(nfo.NumAckPending))
+			lastDeliveredSeq = nfo.Delivered.Stream
+			lastAckedSeq = nfo.AckFloor.Stream
+			lastStateTs = time.Now()
+
+			deliveredRates = resizeData(deliveredRates, width)
+			ackedRates = resizeData(ackedRates, width)
+			unprocessedMessages = resizeData(unprocessedMessages, width)
+			outstandingMessages = resizeData(outstandingMessages, width)
+
+			deliveredPlot := asciigraph.Plot(deliveredRates,
+				asciigraph.Caption("Messages Delivered / second"),
+				asciigraph.Width(width),
+				asciigraph.Height(height/4-2),
+				asciigraph.LowerBound(0),
+				asciigraph.Precision(0),
+				asciigraph.ValueFormatter(f),
+			)
+
+			ackedPlot := asciigraph.Plot(ackedRates,
+				asciigraph.Caption("Messages Acknowledged / second"),
+				asciigraph.Width(width),
+				asciigraph.Height(height/4-2),
+				asciigraph.LowerBound(0),
+				asciigraph.Precision(0),
+				asciigraph.ValueFormatter(f),
+			)
+
+			unprocessedPlot := asciigraph.Plot(unprocessedMessages,
+				asciigraph.Caption("Messages Pending"),
+				asciigraph.Width(width),
+				asciigraph.Height(height/4-2),
+				asciigraph.LowerBound(0),
+				asciigraph.Precision(0),
+				asciigraph.ValueFormatter(fFloat2Int),
+			)
+
+			outstandingPlot := asciigraph.Plot(outstandingMessages,
+				asciigraph.Caption("Messages Waiting for Ack"),
+				asciigraph.Width(width),
+				asciigraph.Height(height/4-2),
+				asciigraph.LowerBound(0),
+				asciigraph.Precision(0),
+				asciigraph.ValueFormatter(fFloat2Int),
+			)
+
+			iu.ClearScreen()
+
+			fmt.Printf("Consumer Statistics for %s > %s\n", c.stream, c.consumer)
+			fmt.Println()
+			fmt.Println(unprocessedPlot)
+			fmt.Println()
+			fmt.Println(outstandingPlot)
+			fmt.Println()
+			fmt.Println(ackedPlot)
+			fmt.Println()
+			fmt.Println(deliveredPlot)
+
+		case <-ctx.Done():
+			iu.ClearScreen()
+			return nil
+		}
+	}
+}
+
+func (c *consumerCmd) balanceAction(_ *fisk.ParseContext) error {
+	var err error
+	var stream *jsm.Stream
+
+	c.connectAndSetup(true, false)
+
+	c.stream, stream, err = selectStream(c.mgr, c.stream, c.force, c.showAll)
+	if err != nil {
+		return err
+	}
+
+	if stream == nil {
+		return fmt.Errorf("no stream selected")
+	}
+
+	var opts []jsm.ConsumerQueryOpt
+	if c.fPush {
+		opts = append(opts, jsm.ConsumerQueryIsPush())
+	}
+	if c.fPull {
+		opts = append(opts, jsm.ConsumerQueryIsPull())
+	}
+	if c.fBound {
+		opts = append(opts, jsm.ConsumerQueryIsBound())
+	}
+	if c.fWaiting > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerWaiting(c.fWaiting))
+	}
+	if c.fAckPending > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerAckPending(c.fAckPending))
+	}
+	if c.fPending > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithFewerPending(c.fPending))
+	}
+	if c.fIdle > 0 {
+		opts = append(opts, jsm.ConsumerQueryWithDeliverySince(c.fIdle))
+	}
+	if c.fCreated > 0 {
+		opts = append(opts, jsm.ConsumerQueryOlderThan(c.fCreated))
+	}
+	if c.fReplicas > 0 {
+		opts = append(opts, jsm.ConsumerQueryReplicas(c.fReplicas))
+	}
+	if c.fInvert {
+		opts = append(opts, jsm.ConsumerQueryInvert())
+	}
+	if c.fExpression != "" {
+		opts = append(opts, jsm.ConsumerQueryExpression(c.fExpression))
+	}
+	if c.fLeader != "" {
+		opts = append(opts, jsm.ConsumerQueryLeaderServer(c.fLeader))
+	}
+	if c.fPinned {
+		opts = append(opts, jsm.ConsumerQueryIsPinned())
+	}
+
+	consumers, err := stream.QueryConsumers(opts...)
+	if err != nil {
+		return err
+	}
+
+	if len(consumers) > 0 {
+		balancer, err := balancer.New(c.mgr.NatsConn(), api.NewDefaultLogger(api.InfoLevel))
+		if err != nil {
+			return err
+		}
+
+		balanced, err := balancer.BalanceConsumers(consumers)
+		if err != nil {
+			return fmt.Errorf("failed to balance consumers on %s - %s", c.stream, err)
+		}
+		fmt.Printf("Balanced %d consumers on %s\n", balanced, c.stream)
+
+	} else {
+		fmt.Printf("No consumers on %s\n", c.stream)
+	}
+	return nil
+}
+
+func (c *consumerCmd) leaderStandDownAction(_ *fisk.ParseContext) error {
 	c.connectAndSetup(true, true)
 
 	consumer, err := c.mgr.LoadConsumer(c.stream, c.consumer)
@@ -227,12 +687,24 @@ func (c *consumerCmd) leaderStandDown(_ *fisk.ParseContext) error {
 	}
 
 	leader := info.Cluster.Leader
-	if leader == "" {
+	if leader == "" && !c.force {
 		return fmt.Errorf("consumer has no current leader")
+	} else if leader == "" {
+		leader = "<unknown>"
+	}
+
+	var p *api.Placement
+	if c.placementPreferred != "" {
+		err = iu.RequireAPILevel(c.mgr, 1, "placement hints during step-down requires NATS Server 2.11")
+		if err != nil {
+			return err
+		}
+
+		p = &api.Placement{Preferred: c.placementPreferred}
 	}
 
 	log.Printf("Requesting leader step down of %q in a %d peer RAFT group", leader, len(info.Cluster.Replicas)+1)
-	err = consumer.LeaderStepDown()
+	err = consumer.LeaderStepDown(p)
 	if err != nil {
 		return err
 	}
@@ -251,13 +723,21 @@ func (c *consumerCmd) leaderStandDown(_ *fisk.ParseContext) error {
 			continue
 		}
 
+		if info.Cluster == nil {
+			log.Printf("Failed to retrieve Consumer State: no cluster information received")
+			continue
+		}
+
 		if info.Cluster.Leader != leader {
 			log.Printf("New leader elected %q", info.Cluster.Leader)
 			break
 		}
 	}
 
-	if info.Cluster.Leader == leader {
+	switch {
+	case info.Cluster == nil:
+		log.Printf("Consumer did not elect a leader after %s", time.Since(start).Round(time.Millisecond))
+	case info.Cluster.Leader == leader:
 		log.Printf("Leader did not change after %s", time.Since(start).Round(time.Millisecond))
 	}
 
@@ -266,6 +746,129 @@ func (c *consumerCmd) leaderStandDown(_ *fisk.ParseContext) error {
 	return nil
 }
 
+func (c *consumerCmd) interactiveEdit(cfg api.ConsumerConfig) (*api.ConsumerConfig, error) {
+	cj, err := decoratedYamlMarshal(cfg)
+	if err != nil {
+		return &api.ConsumerConfig{}, fmt.Errorf("could not create temporary file: %s", err)
+	}
+
+	tfile, err := os.CreateTemp("", "*.yaml")
+	if err != nil {
+		return &api.ConsumerConfig{}, fmt.Errorf("could not create temporary file: %s", err)
+	}
+	defer os.Remove(tfile.Name())
+
+	_, err = fmt.Fprint(tfile, string(cj))
+	if err != nil {
+		return &api.ConsumerConfig{}, fmt.Errorf("could not create temporary file: %s", err)
+	}
+
+	tfile.Close()
+
+	err = iu.EditFile(tfile.Name())
+	if err != nil {
+		return &api.ConsumerConfig{}, err
+	}
+
+	nb, err := os.ReadFile(tfile.Name())
+	if err != nil {
+		return &api.ConsumerConfig{}, err
+	}
+
+	ncfg := api.ConsumerConfig{}
+	err = yaml.Unmarshal(nb, &ncfg)
+	if err != nil {
+		return &api.ConsumerConfig{}, err
+	}
+
+	// some yaml quirks
+	if len(ncfg.BackOff) == 0 {
+		ncfg.BackOff = nil
+	}
+
+	return &ncfg, nil
+}
+
+func (c *consumerCmd) copyAndEditConsumer(cfg api.ConsumerConfig) (*api.ConsumerConfig, error) {
+	var err error
+
+	if c.inputFile != "" {
+		return c.loadConfigFile(c.inputFile)
+	}
+
+	if c.description != "" {
+		cfg.Description = c.description
+	}
+
+	if c.inactiveThreshold != 0 {
+		cfg.InactiveThreshold = c.inactiveThreshold
+	}
+
+	if c.maxDeliver != 0 {
+		cfg.MaxDeliver = c.maxDeliver
+	}
+
+	if c.maxAckPending != -1 {
+		cfg.MaxAckPending = c.maxAckPending
+	}
+
+	if c.ackWait != -1*time.Second {
+		cfg.AckWait = c.ackWait
+	}
+
+	if c.maxWaiting != 0 {
+		cfg.MaxWaiting = c.maxWaiting
+	}
+
+	if c.samplePct != -1 {
+		cfg.SampleFrequency = c.sampleFreqFromInt(c.samplePct)
+	}
+
+	if c.maxPullBatch > 0 {
+		cfg.MaxRequestBatch = c.maxPullBatch
+	}
+
+	if c.maxPullExpire > 0 {
+		cfg.MaxRequestExpires = c.maxPullExpire
+	}
+
+	if c.maxPullBytes > 0 {
+		cfg.MaxRequestMaxBytes = c.maxPullBytes
+	}
+
+	if c.backoffMode != "" {
+		cfg.BackOff, err = c.backoffPolicy()
+		if err != nil {
+			return &api.ConsumerConfig{}, fmt.Errorf("could not determine backoff policy: %v", err)
+		}
+	}
+
+	if c.delivery != "" {
+		cfg.DeliverSubject = c.delivery
+	}
+
+	if c.hdrsOnlySet {
+		cfg.HeadersOnly = c.hdrsOnly
+	}
+
+	if len(c.filterSubjects) == 1 {
+		cfg.FilterSubject = c.filterSubjects[0]
+		cfg.FilterSubjects = nil
+	} else if len(c.filterSubjects) > 1 {
+		cfg.FilterSubjects = c.filterSubjects
+		cfg.FilterSubject = ""
+	}
+
+	if c.replicas > 0 {
+		cfg.Replicas = c.replicas
+	}
+
+	if c.metadataIsSet {
+		cfg.Metadata = c.metadata
+	}
+
+	return &cfg, nil
+}
 func (c *consumerCmd) editAction(pc *fisk.ParseContext) error {
 	c.connectAndSetup(true, true)
 	var err error
@@ -281,81 +884,29 @@ func (c *consumerCmd) editAction(pc *fisk.ParseContext) error {
 
 	// lazy deep copy
 	t := c.selectedConsumer.Configuration()
+	t.Metadata = iu.RemoveReservedMetadata(t.Metadata)
+
 	tj, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
-	var ncfg api.ConsumerConfig
 
-	if c.inputFile != "" {
-		cf, err := os.ReadFile(c.inputFile)
-		if err != nil {
-			return err
-		}
-		err = json.Unmarshal(cf, &ncfg)
-		if err != nil {
-			return err
-		}
+	var ncfg *api.ConsumerConfig
+	err = json.Unmarshal(tj, &ncfg)
+	if err != nil {
+		return err
+	}
+
+	if c.interactive {
+		ncfg, err = c.interactiveEdit(t)
+		fisk.FatalIfError(err, "could not create new configuration for Consumer %s", c.selectedConsumer.Name())
 	} else {
-		err = json.Unmarshal(tj, &ncfg)
-		if err != nil {
-			return err
-		}
+		ncfg, err = c.copyAndEditConsumer(t)
+		fisk.FatalIfError(err, "could not create new configuration for Consumer %s", c.selectedConsumer.Name())
+	}
 
-		if c.description != "" {
-			ncfg.Description = c.description
-		}
-
-		if c.maxDeliver != 0 {
-			ncfg.MaxDeliver = c.maxDeliver
-		}
-
-		if c.maxAckPending != -1 {
-			ncfg.MaxAckPending = c.maxAckPending
-		}
-
-		if c.ackWait != -1*time.Second {
-			ncfg.AckWait = c.ackWait
-		}
-
-		if c.maxWaiting != 0 {
-			ncfg.MaxWaiting = c.maxWaiting
-		}
-
-		if c.samplePct != -1 {
-			ncfg.SampleFrequency = c.sampleFreqFromInt(c.samplePct)
-		}
-
-		if c.maxPullBatch > 0 {
-			ncfg.MaxRequestBatch = c.maxPullBatch
-		}
-
-		if c.maxPullExpire > 0 {
-			ncfg.MaxRequestExpires = c.maxPullExpire
-		}
-
-		if c.maxPullBytes > 0 {
-			ncfg.MaxRequestMaxBytes = c.maxPullBytes
-		}
-
-		if c.backoffMode != "" {
-			ncfg.BackOff, err = c.backoffPolicy()
-			if err != nil {
-				return fmt.Errorf("could not determine backoff policy: %v", err)
-			}
-		}
-
-		if c.delivery != "" {
-			ncfg.DeliverSubject = c.delivery
-		}
-
-		if c.hdrsOnlySet {
-			ncfg.HeadersOnly = c.hdrsOnly
-		}
-
-		if c.filterSubject != "_unset_" {
-			ncfg.FilterSubject = c.filterSubject
-		}
+	if len(ncfg.BackOff) > 0 && ncfg.AckWait != t.AckWait {
+		return fmt.Errorf("consumers with backoff policies do not support editing Ack Wait")
 	}
 
 	// sort strings to subject lists that only differ in ordering is considered equal
@@ -365,7 +916,10 @@ func (c *consumerCmd) editAction(pc *fisk.ParseContext) error {
 		return out
 	})
 
-	diff := cmp.Diff(c.selectedConsumer.Configuration(), ncfg, sorter)
+	t.Metadata = iu.RemoveReservedMetadata(t.Metadata)
+	ncfg.Metadata = iu.RemoveReservedMetadata(ncfg.Metadata)
+
+	diff := cmp.Diff(t, *ncfg, sorter)
 	if diff == "" {
 		if !c.dryRun {
 			fmt.Println("No difference in configuration")
@@ -388,7 +942,12 @@ func (c *consumerCmd) editAction(pc *fisk.ParseContext) error {
 		}
 	}
 
-	cons, err := c.mgr.NewConsumerFromDefault(c.stream, ncfg)
+	err = c.checkConfigLevel(ncfg)
+	if err != nil {
+		return err
+	}
+
+	cons, err := c.mgr.NewConsumerFromDefault(c.stream, *ncfg)
 	if err != nil {
 		return err
 	}
@@ -459,36 +1018,69 @@ func (c *consumerCmd) lsAction(pc *fisk.ParseContext) error {
 	stream, err := c.mgr.LoadStream(c.stream)
 	fisk.FatalIfError(err, "could not load Consumers")
 
-	consumers, err := stream.ConsumerNames()
+	consumerNames, err := stream.ConsumerNames()
 	fisk.FatalIfError(err, "could not load Consumers")
 
 	if c.json {
-		err = printJSON(consumers)
+		err = iu.PrintJSON(consumerNames)
 		fisk.FatalIfError(err, "could not display Consumers")
 		return nil
 	}
 
 	if c.listNames {
-		for _, sc := range consumers {
+		for _, sc := range consumerNames {
 			fmt.Println(sc)
 		}
 
 		return nil
 	}
 
-	if len(consumers) == 0 {
+	if len(consumerNames) == 0 {
 		fmt.Println("No Consumers defined")
 		return nil
 	}
 
-	fmt.Printf("Consumers for Stream %s:\n", c.stream)
-	fmt.Println()
-	for _, sc := range consumers {
-		fmt.Printf("\t%s\n", sc)
+	out, err := c.renderConsumerAsTable(stream)
+	if err != nil {
+		return err
 	}
-	fmt.Println()
+
+	fmt.Println(out)
 
 	return nil
+}
+
+func (c *consumerCmd) renderConsumerAsTable(stream *jsm.Stream) (string, error) {
+	var out bytes.Buffer
+	table := iu.NewTableWriter(opts(), "Consumers")
+	table.AddHeaders("Name", "Description", "Created", "Ack Pending", "Unprocessed", "Last Delivery")
+
+	missing, err := stream.EachConsumer(func(cons *jsm.Consumer) {
+		cs, err := cons.LatestState()
+		if err != nil {
+			log.Printf("Could not obtain consumer state for %s: %s", cons.Name(), err)
+			return
+		}
+
+		lastDelivery := sinceRefOrNow(cs.TimeStamp, time.Time{})
+		if cs.Delivered.Last != nil {
+			lastDelivery = sinceRefOrNow(cs.TimeStamp, *cs.Delivered.Last)
+		}
+
+		table.AddRow(cs.Name, cs.Config.Description, f(cs.Created.Local()), cs.NumAckPending, cs.NumPending, f(lastDelivery))
+
+	})
+	if err != nil {
+		return "", err
+	}
+
+	fmt.Fprintln(&out, table.Render())
+
+	if len(missing) > 0 {
+		c.renderMissing(&out, missing)
+	}
+
+	return out.String(), nil
 }
 
 func (c *consumerCmd) showConsumer(consumer *jsm.Consumer) {
@@ -515,174 +1107,183 @@ func (c *consumerCmd) renderBackoff(bo []time.Duration) string {
 			times = append(times, d.String())
 		}
 
-		return fmt.Sprintf("%s (%d total)", strings.Join(times, ", "), len(bo))
+		return fmt.Sprintf("%s (%d total)", f(times), len(bo))
 	} else {
 		for _, p := range bo {
 			times = append(times, p.String())
 		}
 
-		return strings.Join(times, ", ")
+		return f(times)
 	}
 }
 
 func (c *consumerCmd) showInfo(config api.ConsumerConfig, state api.ConsumerInfo) {
 	if c.json {
-		printJSON(state)
+		iu.PrintJSON(state)
 		return
 	}
 
-	fmt.Printf("Information for Consumer %s > %s created %s\n", state.Stream, state.Name, state.Created.Local().Format(time.RFC3339))
-	fmt.Println()
-	fmt.Println("Configuration:")
-	fmt.Println()
-	if config.Name != "" {
-		fmt.Printf("                Name: %s\n", config.Name)
-	}
-	if config.Durable != "" && config.Durable != config.Name {
-		fmt.Printf("        Durable Name: %s\n", config.Durable)
-	}
-	if config.Description != "" {
-		fmt.Printf("         Description: %s\n", config.Description)
-	}
-	if config.DeliverSubject != "" {
-		fmt.Printf("    Delivery Subject: %s\n", config.DeliverSubject)
+	var cols *columns.Writer
+	if c.showStateOnly {
+		cols = newColumns(fmt.Sprintf("State for Consumer %s > %s created %s", state.Stream, state.Name, state.Created.Local().Format(time.RFC3339)))
 	} else {
-		fmt.Printf("           Pull Mode: true\n")
+		cols = newColumns(fmt.Sprintf("Information for Consumer %s > %s created %s", state.Stream, state.Name, state.Created.Local().Format(time.RFC3339)))
 	}
-	if config.FilterSubject != "" {
-		fmt.Printf("      Filter Subject: %s\n", config.FilterSubject)
+
+	if !c.showStateOnly {
+		cols.AddSectionTitle("Configuration")
+
+		cols.AddRowIfNotEmpty("Name", config.Name)
+		cols.AddRowIf("Durable Name", config.Durable, config.Durable != "" && config.Durable != config.Name)
+		cols.AddRowIfNotEmpty("Description", config.Description)
+
+		if config.DeliverSubject != "" {
+			cols.AddRow("Delivery Subject", config.DeliverSubject)
+		} else {
+			cols.AddRow("Pull Mode", true)
+		}
+
+		if config.FilterSubject != "" {
+			cols.AddRow("Filter Subject", config.FilterSubject)
+		} else if len(config.FilterSubjects) > 0 {
+			cols.AddRow("Filter Subjects", config.FilterSubjects)
+		}
+
+		switch config.DeliverPolicy {
+		case api.DeliverAll:
+			cols.AddRow("Deliver Policy", "All")
+		case api.DeliverLast:
+			cols.AddRow("Deliver Policy", "Last")
+		case api.DeliverNew:
+			cols.AddRow("Deliver Policy", "New")
+		case api.DeliverLastPerSubject:
+			cols.AddRow("Deliver Policy", "Last Per Subject")
+		case api.DeliverByStartTime:
+			cols.AddRowf("Deliver Policy", "Since %s", config.OptStartTime)
+		case api.DeliverByStartSequence:
+			cols.AddRowf("Deliver Policy", "From Sequence %d", config.OptStartSeq)
+		}
+
+		cols.AddRowIf("Deliver Queue Group", config.DeliverGroup, config.DeliverGroup != "" && config.DeliverSubject != "")
+		cols.AddRow("Ack Policy", config.AckPolicy.String())
+		cols.AddRowIf("Ack Wait", config.AckWait, config.AckPolicy != api.AckNone)
+		cols.AddRow("Replay Policy", config.ReplayPolicy.String())
+		cols.AddRowIf("Maximum Deliveries", config.MaxDeliver, config.MaxDeliver != -1)
+		cols.AddRowIfNotEmpty("Sampling Rate", config.SampleFrequency)
+		cols.AddRowIf("Rate Limit", fmt.Sprintf("%s / second", humanize.IBytes(config.RateLimit/8)), config.RateLimit > 0)
+		cols.AddRowIf("Max Ack Pending", config.MaxAckPending, config.MaxAckPending > 0)
+		cols.AddRowIf("Max Waiting Pulls", int64(config.MaxWaiting), config.MaxWaiting > 0)
+		cols.AddRowIf("Idle Heartbeat", config.Heartbeat, config.Heartbeat > 0)
+		cols.AddRowIf("Flow Control", config.FlowControl, config.DeliverSubject != "")
+		cols.AddRowIf("Headers Only", true, config.HeadersOnly)
+		cols.AddRowIf("Inactive Threshold", config.InactiveThreshold, config.InactiveThreshold > 0 && config.DeliverSubject == "")
+		cols.AddRowIf("Max Pull Expire", config.MaxRequestExpires, config.MaxRequestExpires > 0)
+		cols.AddRowIf("Max Pull Batch", config.MaxRequestBatch, config.MaxRequestBatch > 0)
+		cols.AddRowIf("Max Pull MaxBytes", config.MaxRequestMaxBytes, config.MaxRequestMaxBytes > 0)
+		cols.AddRowIf("Backoff", c.renderBackoff(config.BackOff), len(config.BackOff) > 0)
+		cols.AddRowIf("Replicas", config.Replicas, config.Replicas > 0)
+		cols.AddRowIf("Memory Storage", true, config.MemoryStorage)
+		if state.Paused {
+			cols.AddRowf("Paused Until Deadline", "%s (%s remaining)", f(config.PauseUntil), state.PauseRemaining.Round(time.Second))
+		} else {
+			cols.AddRowIf("Paused Until Deadline", fmt.Sprintf("%s (passed)", f(config.PauseUntil)), !config.PauseUntil.IsZero())
+		}
+		if config.PriorityPolicy != api.PriorityNone {
+			cols.AddRow("Priority Policy", config.PriorityPolicy)
+			cols.AddRow("Priority Groups", config.PriorityGroups)
+			cols.AddRowIf("Pinned TTL", config.PinnedTTL, config.PriorityPolicy == api.PriorityPinnedClient)
+		}
+
+		meta := iu.RemoveReservedMetadata(config.Metadata)
+		if len(meta) > 0 {
+			cols.AddSectionTitle("Metadata")
+			cols.AddMapStrings(meta)
+		}
 	}
-	switch config.DeliverPolicy {
-	case api.DeliverAll:
-		fmt.Printf("      Deliver Policy: All\n")
-	case api.DeliverLast:
-		fmt.Printf("      Deliver Policy: Last\n")
-	case api.DeliverNew:
-		fmt.Printf("      Deliver Policy: New\n")
-	case api.DeliverLastPerSubject:
-		fmt.Printf("      Deliver Policy: Last Per Subject\n")
-	case api.DeliverByStartTime:
-		fmt.Printf("      Deliver Policy: Since %v\n", config.OptStartTime)
-	case api.DeliverByStartSequence:
-		fmt.Printf("      Deliver Policy: From Sequence %d\n", config.OptStartSeq)
-	}
-	if config.DeliverGroup != "" && config.DeliverSubject != "" {
-		fmt.Printf(" Deliver Queue Group: %s\n", config.DeliverGroup)
-	}
-	fmt.Printf("          Ack Policy: %s\n", config.AckPolicy.String())
-	if config.AckPolicy != api.AckNone {
-		fmt.Printf("            Ack Wait: %v\n", config.AckWait)
-	}
-	fmt.Printf("       Replay Policy: %s\n", config.ReplayPolicy.String())
-	if config.MaxDeliver != -1 {
-		fmt.Printf("  Maximum Deliveries: %d\n", config.MaxDeliver)
-	}
-	if config.SampleFrequency != "" {
-		fmt.Printf("       Sampling Rate: %s\n", config.SampleFrequency)
-	}
-	if config.RateLimit > 0 {
-		fmt.Printf("          Rate Limit: %s / second\n", humanize.IBytes(config.RateLimit/8))
-	}
-	if config.MaxAckPending > 0 {
-		fmt.Printf("     Max Ack Pending: %s\n", humanize.Comma(int64(config.MaxAckPending)))
-	}
-	if config.MaxWaiting > 0 {
-		fmt.Printf("   Max Waiting Pulls: %s\n", humanize.Comma(int64(config.MaxWaiting)))
-	}
-	if config.Heartbeat > 0 {
-		fmt.Printf("      Idle Heartbeat: %s\n", humanizeDuration(config.Heartbeat))
-	}
-	if config.DeliverSubject != "" {
-		fmt.Printf("        Flow Control: %v\n", config.FlowControl)
-	}
-	if config.HeadersOnly {
-		fmt.Printf("        Headers Only: true\n")
-	}
-	if config.InactiveThreshold > 0 && config.DeliverSubject == "" {
-		fmt.Printf("  Inactive Threshold: %s\n", humanizeDuration(config.InactiveThreshold))
-	}
-	if config.MaxRequestExpires > 0 {
-		fmt.Printf("     Max Pull Expire: %s\n", humanizeDuration(config.MaxRequestExpires))
-	}
-	if config.MaxRequestBatch > 0 {
-		fmt.Printf("      Max Pull Batch: %s\n", humanize.Comma(int64(config.MaxRequestBatch)))
-	}
-	if config.MaxRequestMaxBytes > 0 {
-		fmt.Printf("   Max Pull MaxBytes: %s\n", humanize.Comma(int64(config.MaxRequestMaxBytes)))
-	}
-	if len(config.BackOff) > 0 {
-		fmt.Printf("             Backoff: %s\n", c.renderBackoff(config.BackOff))
-	}
-	if config.Replicas > 0 {
-		fmt.Printf("            Replicas: %d\n", config.Replicas)
-	}
-	if config.MemoryStorage {
-		fmt.Printf("      Memory Storage: yes\n")
-	}
-	fmt.Println()
 
 	if state.Cluster != nil && state.Cluster.Name != "" {
-		fmt.Println("Cluster Information:")
-		fmt.Println()
-		fmt.Printf("                Name: %s\n", state.Cluster.Name)
-		fmt.Printf("              Leader: %s\n", state.Cluster.Leader)
+		cols.AddSectionTitle("Cluster Information")
+		cols.AddRow("Name", state.Cluster.Name)
+		cols.AddRowIfNotEmpty("Raft Group", state.Cluster.RaftGroup)
+		cols.AddRow("Leader", state.Cluster.Leader)
 		for _, r := range state.Cluster.Replicas {
-			since := fmt.Sprintf("seen %s ago", humanizeDuration(r.Active))
+			since := fmt.Sprintf("seen %s ago", f(r.Active))
 			if r.Active == 0 || r.Active == math.MaxInt64 {
 				since = "not seen"
 			}
 
 			if r.Current {
-				fmt.Printf("             Replica: %s, current, %s\n", r.Name, since)
+				cols.AddRowf("Replica", "%s, current, %s", r.Name, since)
 			} else {
-				fmt.Printf("             Replica: %s, outdated, %s\n", r.Name, since)
+				cols.AddRowf("Replica", "%s, outdated, %s", r.Name, since)
 			}
 		}
-		fmt.Println()
 	}
 
-	fmt.Println("State:")
-	fmt.Println()
+	cols.AddSectionTitle("State")
+	iu.RenderMetaApi(cols, config.Metadata)
 	if state.Delivered.Last == nil {
-		fmt.Printf("   Last Delivered Message: Consumer sequence: %s Stream sequence: %s\n", humanize.Comma(int64(state.Delivered.Consumer)), humanize.Comma(int64(state.Delivered.Stream)))
+		cols.AddRowf("Last Delivered Message", "Consumer sequence: %s Stream sequence: %s", f(state.Delivered.Consumer), f(state.Delivered.Stream))
 	} else {
-		fmt.Printf("   Last Delivered Message: Consumer sequence: %s Stream sequence: %s Last delivery: %s ago\n", humanize.Comma(int64(state.Delivered.Consumer)), humanize.Comma(int64(state.Delivered.Stream)), humanizeDuration(time.Since(*state.Delivered.Last)))
+		cols.AddRowf("Last Delivered Message", "Consumer sequence: %s Stream sequence: %s Last delivery: %s ago", f(state.Delivered.Consumer), f(state.Delivered.Stream), f(sinceRefOrNow(state.TimeStamp, *state.Delivered.Last)))
 	}
 
 	if config.AckPolicy != api.AckNone {
 		if state.AckFloor.Last == nil {
-			fmt.Printf("     Acknowledgment floor: Consumer sequence: %s Stream sequence: %s\n", humanize.Comma(int64(state.AckFloor.Consumer)), humanize.Comma(int64(state.AckFloor.Stream)))
+			cols.AddRowf("Acknowledgment Floor", "Consumer sequence: %s Stream sequence: %s", f(state.AckFloor.Consumer), f(state.AckFloor.Stream))
 		} else {
-			fmt.Printf("     Acknowledgment floor: Consumer sequence: %s Stream sequence: %s Last Ack: %s ago\n", humanize.Comma(int64(state.AckFloor.Consumer)), humanize.Comma(int64(state.AckFloor.Stream)), humanizeDuration(time.Since(*state.AckFloor.Last)))
+			cols.AddRowf("Acknowledgment Floor", "Consumer sequence: %s Stream sequence: %s Last Ack: %s ago", f(state.AckFloor.Consumer), f(state.AckFloor.Stream), f(sinceRefOrNow(state.TimeStamp, *state.AckFloor.Last)))
 		}
 		if config.MaxAckPending > 0 {
-			fmt.Printf("         Outstanding Acks: %s out of maximum %s\n", humanize.Comma(int64(state.NumAckPending)), humanize.Comma(int64(config.MaxAckPending)))
+			cols.AddRowf("Outstanding Acks", "%s out of maximum %s", f(state.NumAckPending), f(config.MaxAckPending))
 		} else {
-			fmt.Printf("         Outstanding Acks: %s\n", humanize.Comma(int64(state.NumAckPending)))
+			cols.AddRow("Outstanding Acks", state.NumAckPending)
 		}
-		fmt.Printf("     Redelivered Messages: %s\n", humanize.Comma(int64(state.NumRedelivered)))
+		cols.AddRow("Redelivered Messages", state.NumRedelivered)
 	}
 
-	fmt.Printf("     Unprocessed Messages: %s\n", humanize.Comma(int64(state.NumPending)))
+	cols.AddRow("Unprocessed Messages", state.NumPending)
+
 	if config.DeliverSubject == "" {
 		if config.MaxWaiting > 0 {
-			fmt.Printf("            Waiting Pulls: %s of maximum %s\n", humanize.Comma(int64(state.NumWaiting)), humanize.Comma(int64(config.MaxWaiting)))
+			cols.AddRowf("Waiting Pulls", "%s of maximum %s", f(state.NumWaiting), f(config.MaxWaiting))
 		} else {
-			fmt.Printf("            Waiting Pulls: %s of unlimited\n", humanize.Comma(int64(state.NumWaiting)))
+			cols.AddRowf("Waiting Pulls", "%s of unlimited", f(state.NumWaiting))
 		}
 	} else {
 		if state.PushBound {
 			if config.DeliverGroup != "" {
-				fmt.Printf("          Active Interest: Active using Queue Group %s", config.DeliverGroup)
+				cols.AddRowf("Active Interest", "Active using Queue Group %s", config.DeliverGroup)
 			} else {
-				fmt.Printf("          Active Interest: Active")
+				cols.AddRow("Active Interest", "Active")
 			}
 		} else {
-			fmt.Printf("          Active Interest: No interest")
+			cols.AddRow("Active Interest", "No interest")
 		}
 	}
+	if state.Paused {
+		cols.AddRowf("Paused Until", "%s (%s remaining)", f(state.TimeStamp.Add(state.PauseRemaining)), state.PauseRemaining.Round(time.Second))
+	}
 
-	fmt.Println()
+	if len(state.PriorityGroups) > 0 && config.PriorityPolicy == api.PriorityPinnedClient {
+		groups := map[string]string{}
+		for _, v := range state.PriorityGroups {
+			msg := "No client"
+			if v.PinnedClientID != "" {
+				msg = fmt.Sprintf("pinned %s at %s", v.PinnedClientID, f(v.PinnedTS))
+			}
+
+			groups[v.Group] = msg
+		}
+		cols.AddMapStringsAsValue("Priority Groups", groups)
+	}
+
+	cols.Frender(os.Stdout)
+}
+
+func (c *consumerCmd) stateAction(pc *fisk.ParseContext) error {
+	c.showStateOnly = true
+	return c.infoAction(pc)
 }
 
 func (c *consumerCmd) infoAction(_ *fisk.ParseContext) error {
@@ -690,6 +1291,7 @@ func (c *consumerCmd) infoAction(_ *fisk.ParseContext) error {
 
 	var err error
 	consumer := c.selectedConsumer
+
 	if consumer == nil {
 		consumer, err = c.mgr.LoadConsumer(c.stream, c.consumer)
 		fisk.FatalIfError(err, "could not load Consumer %s > %s", c.stream, c.consumer)
@@ -764,7 +1366,7 @@ func (c *consumerCmd) setStartPolicy(cfg *api.ConsumerConfig, policy string) {
 		cfg.DeliverPolicy = api.DeliverByStartSequence
 		cfg.OptStartSeq = uint64(seq)
 	} else {
-		d, err := parseDurationString(policy)
+		d, err := fisk.ParseDuration(policy)
 		fisk.FatalIfError(err, "could not parse starting delta")
 		t := time.Now().UTC().Add(-d)
 		cfg.DeliverPolicy = api.DeliverByStartTime
@@ -811,8 +1413,10 @@ func (c *consumerCmd) cpAction(pc *fisk.ParseContext) (err error) {
 		cfg.AckPolicy = c.ackPolicyFromString(c.ackPolicy)
 	}
 
-	if c.filterSubject != "_unset_" {
-		cfg.FilterSubject = c.filterSubject
+	if len(c.filterSubjects) == 1 {
+		cfg.FilterSubject = c.filterSubjects[0]
+	} else if len(c.filterSubjects) > 1 {
+		cfg.FilterSubjects = c.filterSubjects
 	}
 
 	if c.replayPolicy != "" {
@@ -831,8 +1435,8 @@ func (c *consumerCmd) cpAction(pc *fisk.ParseContext) (err error) {
 		cfg.MaxAckPending = c.maxAckPending
 	}
 
-	if c.idleHeartbeat != "" && c.idleHeartbeat != "-" {
-		hb, err := parseDurationString(c.idleHeartbeat)
+	if c.idleHeartbeat != "" && c.idleHeartbeat != "-1" {
+		hb, err := fisk.ParseDuration(c.idleHeartbeat)
 		fisk.FatalIfError(err, "Invalid heartbeat duration")
 		cfg.Heartbeat = hb
 	}
@@ -903,18 +1507,52 @@ func (c *consumerCmd) cpAction(pc *fisk.ParseContext) (err error) {
 	return nil
 }
 
-func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerConfig, err error) {
+func (c *consumerCmd) loadConfigFile(file string) (*api.ConsumerConfig, error) {
+	f, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg api.ConsumerConfig
+
+	// there is a chance that this is a `nats c info --json` output
+	// which is a ConsumerInfo, so we detect if this is one of those
+	// by checking if there's a config key then extract that, else
+	// we try loading it as a StreamConfig
+
+	var nfo map[string]any
+	err = json.Unmarshal(f, &nfo)
+	if err != nil {
+		return nil, err
+	}
+
+	_, ok := nfo["config"]
+	if ok {
+		var nfo api.ConsumerInfo
+		err = json.Unmarshal(f, &nfo)
+		if err != nil {
+			return nil, err
+		}
+		cfg = nfo.Config
+	} else {
+		err = json.Unmarshal(f, &cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &cfg, nil
+}
+
+func (c *consumerCmd) prepareConfig() (cfg *api.ConsumerConfig, err error) {
 	cfg = c.defaultConsumer()
 	cfg.Description = c.description
 
 	if c.inputFile != "" {
-		f, err := os.ReadFile(c.inputFile)
+		cfg, err = c.loadConfigFile(c.inputFile)
 		if err != nil {
 			return nil, err
 		}
-
-		cfg = &api.ConsumerConfig{}
-		err = json.Unmarshal(f, cfg)
 
 		if cfg.Durable != "" && c.consumer != "" && cfg.Durable != c.consumer {
 			if c.consumer != "" {
@@ -928,24 +1566,31 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 			cfg.DeliverSubject = c.delivery
 		}
 
+		cfg.Metadata = iu.RemoveReservedMetadata(cfg.Metadata)
+
 		return cfg, err
 	}
 
 	if c.consumer == "" && !c.ephemeral {
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Consumer name",
-			Help:    "This will be used for the name of the durable subscription to be used when referencing this Consumer later. Settable using 'name' CLI argument",
+			Help:    "This will be used for the name to be used when referencing this Consumer later. Settable using 'name' CLI argument",
 		}, &c.consumer, survey.WithValidator(survey.Required))
 		fisk.FatalIfError(err, "could not request durable name")
 	}
-	cfg.Durable = c.consumer
+
+	if c.ephemeral {
+		cfg.Name = c.consumer
+	} else {
+		cfg.Durable = c.consumer
+	}
 
 	if ok, _ := regexp.MatchString(`\.|\*|>`, cfg.Durable); ok {
 		fisk.Fatalf("durable name can not contain '.', '*', '>'")
 	}
 
 	if !c.pull && c.delivery == "" {
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Delivery target (empty for Pull Consumers)",
 			Help:    "Consumers can be in 'push' or 'pull' mode, in 'push' mode messages are dispatched in real time to a target STHG-MS subject, this is that subject. Leaving this blank creates a 'pull' mode Consumer. Settable using --target and --pull",
 		}, &c.delivery)
@@ -954,8 +1599,42 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 
 	cfg.DeliverSubject = c.delivery
 
+	if c.acceptDefaults {
+		if c.deliveryGroup == "_unset_" {
+			c.deliveryGroup = ""
+		}
+		if c.startPolicy == "" {
+			c.startPolicy = "all"
+		}
+		if c.ackPolicy == "" {
+			c.ackPolicy = "none"
+			if c.pull || c.delivery == "" {
+				c.ackPolicy = "explicit"
+			}
+		}
+		if c.maxDeliver == 0 {
+			c.maxDeliver = -1
+		}
+		if c.maxAckPending == -1 {
+			c.maxAckPending = 0
+		}
+		if c.replayPolicy == "" {
+			c.replayPolicy = "instant"
+		}
+		if c.idleHeartbeat == "" {
+			c.idleHeartbeat = "-1"
+		}
+		if !c.hdrsOnlySet {
+			c.hdrsOnlySet = true
+		}
+		if cfg.DeliverSubject != "" {
+			c.replayPolicy = "instant"
+			c.fcSet = true
+		}
+	}
+
 	if cfg.DeliverSubject != "" && c.deliveryGroup == "_unset_" {
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Delivery Queue Group",
 			Help:    "When set push consumers will only deliver messages to subscriptions matching this queue group",
 		}, &c.deliveryGroup)
@@ -967,7 +1646,7 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	}
 
 	if c.startPolicy == "" {
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Start policy (all, new, last, subject, 1h, msg sequence)",
 			Help:    "This controls how the Consumer starts out, does it make all messages available, only the latest, latest per subject, ones after a certain time or time sequence. Settable using --deliver",
 			Default: "all",
@@ -984,8 +1663,8 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 			dflt = "explicit"
 		}
 
-		err = askOne(&survey.Select{
-			Message: "Acknowledgement policy",
+		err = iu.AskOne(&survey.Select{
+			Message: "Acknowledgment policy",
 			Options: valid,
 			Default: dflt,
 			Help:    "Messages that are not acknowledged will be redelivered at a later time. 'none' means no acknowledgement is needed only 1 delivery ever, 'all' means acknowledging message 10 will also acknowledge 0-9 and 'explicit' means each has to be acknowledged specifically. Settable using --ack",
@@ -994,7 +1673,7 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	}
 
 	if c.replayPolicy == "" {
-		err = askOne(&survey.Select{
+		err = iu.AskOne(&survey.Select{
 			Message: "Replay policy",
 			Options: []string{"instant", "original"},
 			Default: "instant",
@@ -1004,10 +1683,6 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	}
 
 	cfg.AckPolicy = c.ackPolicyFromString(c.ackPolicy)
-	if cfg.AckPolicy == api.AckNone && cfg.DeliverSubject == "" {
-		fisk.Fatalf("pull consumers can only be explicit or all acknowledgement modes")
-	}
-
 	if cfg.AckPolicy == api.AckNone {
 		cfg.MaxDeliver = -1
 	}
@@ -1027,7 +1702,7 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	if cfg.DeliverSubject != "" {
 		if c.replayPolicy == "" {
 			mode := ""
-			err = askOne(&survey.Select{
+			err = iu.AskOne(&survey.Select{
 				Message: "Replay policy",
 				Options: []string{"instant", "original"},
 				Default: "instant",
@@ -1042,21 +1717,31 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 		cfg.ReplayPolicy = c.replayPolicyFromString(c.replayPolicy)
 	}
 
-	if c.filterSubject == "_unset_" {
-		err = askOne(&survey.Input{
-			Message: "Filter Stream by subject (blank for all)",
+	switch {
+	case len(c.filterSubjects) == 0 && !c.acceptDefaults:
+		sub := ""
+		err = iu.AskOne(&survey.Input{
+			Message: "Filter Stream by subjects (blank for all)",
 			Default: "",
-			Help:    "Stream can consume more than one subject - or a wildcard - this allows you to filter out just a single subject from all the ones entering the Stream for delivery to the Consumer. Settable using --filter",
-		}, &c.filterSubject)
+			Help:    "Consumers can filter messages from the stream, this is a space or comma separated list that can include wildcards. Settable using --filter",
+		}, &sub)
 		fisk.FatalIfError(err, "could not ask for filtering subject")
+		c.filterSubjects = iu.SplitString(sub)
 	}
-	cfg.FilterSubject = c.filterSubject
-	if cfg.FilterSubject == "" && cfg.DeliverPolicy == api.DeliverLastPerSubject {
+
+	switch {
+	case len(c.filterSubjects) == 1:
+		cfg.FilterSubject = c.filterSubjects[0]
+	case len(c.filterSubjects) > 1:
+		cfg.FilterSubjects = c.filterSubjects
+	}
+
+	if cfg.FilterSubject == "" && len(c.filterSubjects) == 0 && cfg.DeliverPolicy == api.DeliverLastPerSubject {
 		cfg.FilterSubject = ">"
 	}
 
 	if c.maxDeliver == 0 && cfg.AckPolicy != api.AckNone {
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Maximum Allowed Deliveries",
 			Default: "-1",
 			Help:    "When this is -1 unlimited attempts to deliver an un acknowledged message is made, when this is >0 it will be maximum amount of times a message is delivered after which it is ignored. Settable using --max-deliver.",
@@ -1065,8 +1750,8 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	}
 
 	if c.maxAckPending == -1 && cfg.AckPolicy != api.AckNone {
-		err = askOne(&survey.Input{
-			Message: "Maximum Acknowledgements Pending",
+		err = iu.AskOne(&survey.Input{
+			Message: "Maximum Acknowledgments Pending",
 			Default: "0",
 			Help:    "The maximum number of messages without acknowledgement that can be outstanding, once this limit is reached message delivery will be suspended. Settable using --max-pending.",
 		}, &c.maxAckPending)
@@ -1077,17 +1762,17 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 		if c.idleHeartbeat == "-1" {
 			cfg.Heartbeat = 0
 		} else if c.idleHeartbeat != "" {
-			cfg.Heartbeat, err = parseDurationString(c.idleHeartbeat)
+			cfg.Heartbeat, err = fisk.ParseDuration(c.idleHeartbeat)
 			fisk.FatalIfError(err, "invalid heartbeat duration")
 		} else {
 			idle := "0s"
-			err = askOne(&survey.Input{
+			err = iu.AskOne(&survey.Input{
 				Message: "Idle Heartbeat",
 				Help:    "When a Push consumer is idle for the given period an empty message with a Status header of 100 will be sent to the delivery subject, settable using --heartbeat",
 				Default: "0s",
 			}, &idle)
 			fisk.FatalIfError(err, "could not ask for idle heartbeat")
-			cfg.Heartbeat, err = parseDurationString(idle)
+			cfg.Heartbeat, err = fisk.ParseDuration(idle)
 			fisk.FatalIfError(err, "invalid heartbeat duration")
 		}
 	}
@@ -1107,7 +1792,7 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 	}
 	cfg.HeadersOnly = c.hdrsOnly
 
-	if c.backoffMode == "" {
+	if cfg.AckPolicy != api.AckNone && !c.acceptDefaults && c.backoffMode == "" {
 		err = c.askBackoffPolicy()
 		if err != nil {
 			return nil, err
@@ -1157,11 +1842,141 @@ func (c *consumerCmd) prepareConfig(pc *fisk.ParseContext) (cfg *api.ConsumerCon
 		return nil, fmt.Errorf("rate limits are only possible on Push consumers")
 	}
 
+	if cfg.DeliverSubject == "" && (c.idleHeartbeat != "" && c.idleHeartbeat != "-1") {
+		return nil, fmt.Errorf("pull subscribers does not support idle heartbeats")
+	}
+
 	cfg.RateLimit = c.bpsRateLimit
 	cfg.Replicas = c.replicas
 	cfg.MemoryStorage = c.memory
 
+	if c.metadataIsSet {
+		cfg.Metadata = c.metadata
+	}
+
+	if c.pauseUntil != "" {
+		cfg.PauseUntil, err = c.parsePauseUntil(c.pauseUntil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	switch {
+	case len(c.pinnedGroups) > 0 && len(c.overflowGroups) > 0:
+		return nil, fmt.Errorf("setting both overflow and pinned groups are not supported")
+	case len(c.pinnedGroups) > 0:
+		cfg.PriorityPolicy = api.PriorityPinnedClient
+		cfg.PriorityGroups = c.pinnedGroups
+		cfg.PinnedTTL = c.pinnedTTL
+	case len(c.overflowGroups) > 0:
+		cfg.PriorityPolicy = api.PriorityOverflow
+		cfg.PriorityGroups = c.pinnedGroups
+	}
+
+	cfg.Metadata = iu.RemoveReservedMetadata(cfg.Metadata)
+
 	return cfg, nil
+}
+
+func (c *consumerCmd) parsePauseUntil(until string) (time.Time, error) {
+	if until == "" {
+		return time.Time{}, fmt.Errorf("time not given")
+	}
+
+	var ts time.Time
+	var err error
+
+	ts, err = time.Parse(time.DateTime, until)
+	if err != nil {
+		dur, err := fisk.ParseDuration(until)
+		if err != nil {
+			return ts, fmt.Errorf("could not parse the pause time as either timestamp or duration")
+		}
+		ts = time.Now().Add(dur)
+	}
+
+	return ts, nil
+}
+
+func (c *consumerCmd) resumeAction(_ *fisk.ParseContext) error {
+	c.connectAndSetup(true, true)
+
+	err := iu.RequireAPILevel(c.mgr, 1, "resuming Consumers requires NATS Server 2.11")
+	if err != nil {
+		return err
+	}
+
+	state, err := c.selectedConsumer.LatestState()
+	if err != nil {
+		return err
+	}
+	if !state.Paused {
+		return fmt.Errorf("consumer is not paused")
+	}
+
+	if !c.force {
+		ok, err := askConfirmation(fmt.Sprintf("Really resume Consumer %s > %s", c.stream, c.consumer), false)
+		fisk.FatalIfError(err, "could not obtain confirmation")
+
+		if !ok {
+			return nil
+		}
+	}
+
+	err = c.selectedConsumer.Resume()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Consumer %s > %s was resumed while previously paused until %s\n", c.stream, c.consumer, f(state.TimeStamp.Add(state.PauseRemaining)))
+	return nil
+}
+
+func (c *consumerCmd) pauseAction(_ *fisk.ParseContext) error {
+	c.connectAndSetup(true, true)
+
+	err := iu.RequireAPILevel(c.mgr, 1, "pausing Consumers requires NATS Server 2.11")
+	if err != nil {
+		return err
+	}
+
+	if c.pauseUntil == "" {
+		dflt := time.Now().Add(time.Hour).Format(time.DateTime)
+		err := iu.AskOne(&survey.Input{
+			Message: "Pause until (time or duration)",
+			Default: dflt,
+			Help:    fmt.Sprintf("Sets the time in either a duration like 1h30m or a timestamp like '%s'", dflt),
+		}, &c.pauseUntil, survey.WithValidator(survey.Required))
+		if err != nil {
+			return err
+		}
+	}
+
+	ts, err := c.parsePauseUntil(c.pauseUntil)
+	if err != nil {
+		return err
+	}
+
+	if !c.force {
+		ok, err := askConfirmation(fmt.Sprintf("Really pause Consumer %s > %s until %s", c.stream, c.consumer, f(ts)), false)
+		fisk.FatalIfError(err, "could not obtain confirmation")
+
+		if !ok {
+			return nil
+		}
+	}
+
+	resp, err := c.selectedConsumer.Pause(ts)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Paused {
+		return fmt.Errorf("consumer failed to pause, perhaps a time in the past was given")
+	}
+
+	fmt.Printf("Paused %s > %s until %s (%s)\n", c.selectedConsumer.StreamName(), c.selectedConsumer.Name(), f(resp.PauseUntil), resp.PauseRemaining.Round(time.Second))
+	return nil
 }
 
 func (c *consumerCmd) askBackoffPolicy() error {
@@ -1171,7 +1986,7 @@ func (c *consumerCmd) askBackoffPolicy() error {
 	}
 
 	if ok {
-		err = askOne(&survey.Select{
+		err = iu.AskOne(&survey.Select{
 			Message: "Backoff policy",
 			Options: []string{"linear", "none"},
 			Default: "none",
@@ -1186,7 +2001,7 @@ func (c *consumerCmd) askBackoffPolicy() error {
 		}
 
 		d := ""
-		err := askOne(&survey.Input{
+		err := iu.AskOne(&survey.Input{
 			Message: "Minimum retry time",
 			Help:    "Backoff policies range from min to max",
 			Default: "1m",
@@ -1194,12 +2009,12 @@ func (c *consumerCmd) askBackoffPolicy() error {
 		if err != nil {
 			return err
 		}
-		c.backoffMin, err = parseDurationString(d)
+		c.backoffMin, err = fisk.ParseDuration(d)
 		if err != nil {
 			return err
 		}
 
-		err = askOne(&survey.Input{
+		err = iu.AskOne(&survey.Input{
 			Message: "Maximum retry time",
 			Help:    "Backoff policies range from min to max",
 			Default: "10m",
@@ -1207,7 +2022,7 @@ func (c *consumerCmd) askBackoffPolicy() error {
 		if err != nil {
 			return err
 		}
-		c.backoffMax, err = parseDurationString(d)
+		c.backoffMax, err = fisk.ParseDuration(d)
 		if err != nil {
 			return err
 		}
@@ -1241,7 +2056,8 @@ func (c *consumerCmd) validateCfg(cfg *api.ConsumerConfig) (bool, []byte, []stri
 }
 
 func (c *consumerCmd) createAction(pc *fisk.ParseContext) (err error) {
-	cfg, err := c.prepareConfig(pc)
+	c.connectAndSetup(true, false)
+	cfg, err := c.prepareConfig()
 	if err != nil {
 		return err
 	}
@@ -1268,10 +2084,13 @@ func (c *consumerCmd) createAction(pc *fisk.ParseContext) (err error) {
 			fisk.Fatalf("Validation Failed: %s", strings.Join(errs, "\n\t"))
 		}
 
-		return os.WriteFile(c.outFile, j, 0644)
+		return os.WriteFile(c.outFile, j, 0600)
 	}
 
-	c.connectAndSetup(true, false)
+	err = c.checkConfigLevel(cfg)
+	if err != nil {
+		return err
+	}
 
 	created, err := c.mgr.NewConsumerFromDefault(c.stream, *cfg)
 	fisk.FatalIfError(err, "Consumer creation failed")
@@ -1283,8 +2102,26 @@ func (c *consumerCmd) createAction(pc *fisk.ParseContext) (err error) {
 	return nil
 }
 
+func (c *consumerCmd) checkConfigLevel(cfg *api.ConsumerConfig) error {
+	if !cfg.PauseUntil.IsZero() {
+		err := iu.RequireAPILevel(c.mgr, 1, "pausing consumers requires NATS Server 2.11")
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(cfg.PriorityGroups) > 0 || cfg.PriorityPolicy != api.PriorityNone {
+		err := iu.RequireAPILevel(c.mgr, 1, "Consumer Groups requires NATS Server 2.11")
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (c *consumerCmd) getNextMsgDirect(stream string, consumer string) error {
-	req := &api.JSApiConsumerGetNextRequest{Batch: 1, Expires: opts.Timeout}
+	req := &api.JSApiConsumerGetNextRequest{Batch: 1, Expires: opts().Timeout}
 
 	sub, err := c.nc.SubscribeSync(c.nc.NewRespInbox())
 	fisk.FatalIfError(err, "subscribe failed")
@@ -1302,7 +2139,21 @@ func (c *consumerCmd) getNextMsgDirect(stream string, consumer string) error {
 		}
 	}
 
-	msg, err := sub.NextMsg(opts.Timeout)
+	if c.term {
+		if !c.ackSetByUser {
+			c.ack = false
+		}
+
+		if c.ack || c.nak {
+			fisk.Fatalf("can not both Acknowledge and Terminate message")
+		}
+
+		if c.ack && c.nak {
+			fisk.Fatalf("can not both Acknowledge and NaK message")
+		}
+	}
+
+	msg, err := sub.NextMsg(opts().Timeout)
 	if err != nil {
 		fatalIfNotPull()
 	}
@@ -1322,7 +2173,7 @@ func (c *consumerCmd) getNextMsgDirect(stream string, consumer string) error {
 			}
 
 		} else {
-			fmt.Printf("[%s] subj: %s / tries: %d / cons seq: %d / str seq: %d / pending: %s\n", time.Now().Format("15:04:05"), msg.Subject, info.Delivered(), info.ConsumerSequence(), info.StreamSequence(), humanize.Comma(int64(info.Pending())))
+			fmt.Printf("[%s] subj: %s / tries: %d / cons seq: %d / str seq: %d / pending: %s\n", time.Now().Format("15:04:05"), msg.Subject, info.Delivered(), info.ConsumerSequence(), info.StreamSequence(), f(info.Pending()))
 		}
 
 		if len(msg.Header) > 0 {
@@ -1346,26 +2197,46 @@ func (c *consumerCmd) getNextMsgDirect(stream string, consumer string) error {
 		fmt.Println(string(msg.Data))
 	}
 
-	if c.ack {
+	if c.term {
+		err = msg.Term()
+		fisk.FatalIfError(err, "could not Terminate message")
+		c.nc.Flush()
+		fmt.Println("\nTerminated message")
+	}
+
+	if c.ack || c.nak {
 		var stime time.Duration
 		if c.ackWait > 0 {
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			stime = time.Duration(r.Intn(int(c.ackWait)))
-
 		}
 
 		if stime > 0 {
 			time.Sleep(stime)
 		}
 
-		err = msg.Respond(nil)
+		ack := api.AckAck
+		if c.nak {
+			ack = api.AckNak
+		}
+		if opts().Trace {
+			log.Printf(">>> %s: %s", msg.Reply, string(ack))
+		}
+
+		err = msg.Respond(ack)
+
 		fisk.FatalIfError(err, "could not Acknowledge message")
 		c.nc.Flush()
+
 		if !c.raw {
+			neg := ""
+			if c.nak {
+				neg = "Negative "
+			}
 			if stime > 0 {
-				fmt.Printf("\nAcknowledged message after %s delay\n", stime)
+				fmt.Printf("\n%sAcknowledged message after %s delay\n", neg, stime)
 			} else {
-				fmt.Println("\nAcknowledged message")
+				fmt.Printf("\n%sAcknowledged message\n", neg)
 			}
 			fmt.Println()
 		}
@@ -1376,7 +2247,7 @@ func (c *consumerCmd) getNextMsgDirect(stream string, consumer string) error {
 
 func (c *consumerCmd) subscribeConsumer(consumer *jsm.Consumer) (err error) {
 	if !c.raw {
-		fmt.Printf("Subscribing to topic %s auto acknowlegement: %v\n\n", consumer.DeliverySubject(), c.ack)
+		fmt.Printf("Subscribing to topic %s auto acknowledgment: %v\n\n", consumer.DeliverySubject(), c.ack)
 		fmt.Println("Consumer Info:")
 		fmt.Printf("  Ack Policy: %s\n", consumer.AckPolicy().String())
 		if consumer.AckPolicy() != api.AckNone {
@@ -1410,7 +2281,7 @@ func (c *consumerCmd) subscribeConsumer(consumer *jsm.Consumer) (err error) {
 			now := time.Now().Format("15:04:05")
 
 			if msginfo != nil {
-				fmt.Printf("[%s] subj: %s / tries: %d / cons seq: %d / str seq: %d / pending: %s\n", now, m.Subject, msginfo.Delivered(), msginfo.ConsumerSequence(), msginfo.StreamSequence(), humanize.Comma(int64(msginfo.Pending())))
+				fmt.Printf("[%s] subj: %s / tries: %d / cons seq: %d / str seq: %d / pending: %s\n", now, m.Subject, msginfo.Delivered(), msginfo.ConsumerSequence(), msginfo.StreamSequence(), f(msginfo.Pending()))
 			} else {
 				fmt.Printf("[%s] %s reply: %s\n", now, m.Subject, m.Reply)
 			}
@@ -1501,8 +2372,10 @@ func (c *consumerCmd) nextAction(_ *fisk.ParseContext) error {
 func (c *consumerCmd) connectAndSetup(askStream bool, askConsumer bool, opts ...nats.Option) {
 	var err error
 
-	c.nc, c.mgr, err = prepareHelper("", append(natsOpts(), opts...)...)
-	fisk.FatalIfError(err, "setup failed")
+	if c.nc == nil || c.mgr == nil {
+		c.nc, c.mgr, err = prepareHelper("", append(natsOpts(), opts...)...)
+		fisk.FatalIfError(err, "setup failed")
+	}
 
 	if c.stream != "" && c.consumer != "" {
 		c.selectedConsumer, err = c.mgr.LoadConsumer(c.stream, c.consumer)
@@ -1537,9 +2410,9 @@ func (c *consumerCmd) reportAction(_ *fisk.ParseContext) error {
 
 	leaders := make(map[string]*raftLeader)
 
-	table := newTableWriter(fmt.Sprintf("Consumer report for %s with %s consumers", c.stream, humanize.Comma(int64(ss.Consumers))))
+	table := iu.NewTableWriter(opts(), fmt.Sprintf("Consumer report for %s with %s consumers", c.stream, f(ss.Consumers)))
 	table.AddHeaders("Consumer", "Mode", "Ack Policy", "Ack Wait", "Ack Pending", "Redelivered", "Unprocessed", "Ack Floor", "Cluster")
-	err = s.EachConsumer(func(cons *jsm.Consumer) {
+	missing, err := s.EachConsumer(func(cons *jsm.Consumer) {
 		cs, err := cons.LatestState()
 		if err != nil {
 			log.Printf("Could not obtain consumer state for %s: %s", cons.Name(), err)
@@ -1570,10 +2443,10 @@ func (c *consumerCmd) reportAction(_ *fisk.ParseContext) error {
 				if upct > 100 {
 					upct = 100
 				}
-				unprocessed = fmt.Sprintf("%s / %0.0f%%", humanize.Comma(int64(cs.NumPending)), upct)
+				unprocessed = fmt.Sprintf("%s / %0.0f%%", f(cs.NumPending), upct)
 			}
 
-			table.AddRow(cons.Name(), mode, cons.AckPolicy().String(), humanizeDuration(cons.AckWait()), humanize.Comma(int64(cs.NumAckPending)), humanize.Comma(int64(cs.NumRedelivered)), unprocessed, humanize.Comma(int64(cs.AckFloor.Stream)), renderCluster(cs.Cluster))
+			table.AddRow(cons.Name(), mode, cons.AckPolicy().String(), f(cons.AckWait()), f(cs.NumAckPending), f(cs.NumRedelivered), unprocessed, f(cs.AckFloor.Stream), renderCluster(cs.Cluster))
 		}
 	})
 	if err != nil {
@@ -1586,5 +2459,28 @@ func (c *consumerCmd) reportAction(_ *fisk.ParseContext) error {
 		renderRaftLeaders(leaders, "Consumers")
 	}
 
+	if len(missing) > 0 {
+		c.renderMissing(os.Stdout, missing)
+	}
+
 	return nil
+}
+
+func (c *consumerCmd) renderMissing(out io.Writer, missing []string) {
+	toany := func(items []string) (res []any) {
+		for _, i := range items {
+			res = append(res, any(i))
+		}
+		return res
+	}
+
+	if len(missing) > 0 {
+		fmt.Fprintln(out)
+		sort.Strings(missing)
+		table := iu.NewTableWriter(opts(), "Inaccessible Consumers")
+		iu.SliceGroups(missing, 4, func(names []string) {
+			table.AddRow(toany(names)...)
+		})
+		fmt.Fprint(out, table.Render())
+	}
 }

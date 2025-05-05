@@ -1,4 +1,4 @@
-// Copyright 2020-2022 The NATS Authors
+// Copyright 2020-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/nats-io/natscli/internal/util"
 	"runtime"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ type rateTrackInt struct {
 	sync.Mutex
 }
 
-func (r *rateTrackInt) Comma() string  { return humanize.Comma(r.Rate()) }
+func (r *rateTrackInt) Comma() string  { return f(r.Rate()) }
 func (r *rateTrackInt) IBytes() string { return humanize.IBytes(uint64(r.Rate())) }
 func (r *rateTrackInt) Inc()           { r.IncN(1) }
 
@@ -177,10 +178,10 @@ func (c *trafficCmd) monitor(_ *fisk.ParseContext) error {
 			if len(raftRows) > 10 {
 				raftRows = raftRows[1:]
 			}
-			raftRows = append(raftRows, []any{c.raftProp.Comma(), c.raftVote.Comma(), c.raftAppend.Comma(), c.raftRemovePeer.Comma(), c.raftReply.Comma(), c.raftC.Comma()})
+			raftRows = append(raftRows, []any{c.raftVote.Comma(), c.raftAppend.Comma(), c.raftReply.Comma(), c.raftRemovePeer.Comma(), c.raftProp.Comma(), c.raftC.Comma()})
 
-			table := newTableWriter("Raft Traffic")
-			table.AddHeaders("Proposal", "Vote", "Append", "Remove Peer", "Reply", "Total Messages")
+			table := util.NewTableWriter(opts(), "Raft Traffic")
+			table.AddHeaders("Vote", "Append", "Reply", "Remove Peer", "Proposal", "Total Messages")
 			for i := range raftRows {
 				table.AddRow(raftRows[i]...)
 			}
@@ -193,7 +194,7 @@ func (c *trafficCmd) monitor(_ *fisk.ParseContext) error {
 			}
 			clusterRows = append(clusterRows, []any{c.clusterJSAUpdate.Comma(), c.clusterStreamInfo.Comma(), c.clusterConsumerInfo.Comma(), c.clusterStreamSync.Comma(), c.clusterReply.Comma(), c.clusterC.Comma()})
 
-			table := newTableWriter("Cluster Traffic")
+			table := util.NewTableWriter(opts(), "Cluster Traffic")
 			table.AddHeaders("JSA Update", "Stream Info", "Consumer Info", "Stream Sync", "Reply", "Total Messages")
 			for i := range clusterRows {
 				table.AddRow(clusterRows[i]...)
@@ -206,7 +207,7 @@ func (c *trafficCmd) monitor(_ *fisk.ParseContext) error {
 		}
 		genRows = append(genRows, []any{c.requests.Comma(), c.jsAPI.Comma(), c.jsAck.Comma(), c.systemMsg.Comma(), c.msgs.Comma(), c.size.IBytes(), c.genC.Comma()})
 
-		table := newTableWriter("General Traffic")
+		table := util.NewTableWriter(opts(), "General Traffic")
 		table.AddHeaders("Requests", "JS API", "JS ACK", "System", "Rest", "Total Bytes", "Total Messages")
 		for i := range genRows {
 			table.AddRow(genRows[i]...)

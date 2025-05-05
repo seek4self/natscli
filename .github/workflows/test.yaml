@@ -5,7 +5,7 @@ jobs:
   test:
     strategy:
       matrix:
-        go: [ 1.18, 1.19 ]
+        go: [ "1.23", "1.24" ]
 
     env:
       GOPATH: /home/runner/work/natscli
@@ -13,12 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v1
-        with:
-          path: src/github.com/nats-io/natscli
+        uses: actions/checkout@v4
 
       - name: Setup Go
-        uses: actions/setup-go@v1
+        uses: actions/setup-go@v5
         with:
           go-version: ${{matrix.go}}
 
@@ -38,18 +36,15 @@ jobs:
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           PATH=$PATH:$GOPATH/bin
-          GO_LIST=$(go list ./...)
+          GO_LIST=$(go list ./... | grep -F -e asciigraph -v)
           $(exit $(go fmt $GO_LIST | wc -l))
           go vet -composites=false $GO_LIST
-          find . -type f -name "*.go" | xargs misspell -error -locale US
+          find . -type f -name "*.go" | grep -F -e asciigraph -v | xargs misspell -error -locale US
           staticcheck -f stylish $GO_LIST
 
       - name: Run tests
         shell: bash --noprofile --norc -x -eo pipefail {0}
         run: |
           set -e
-          cd nats
-          go test -v --failfast -p=1 ./...
-          cd ../cli
-          go test -v --failfast -p=1 ./...
+          go list ./... | grep -F -e asciigraph -v | xargs go test -v --failfast -p=1
           set +e

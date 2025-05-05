@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,8 +14,10 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/jedib0t/go-pretty/v6/progress"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,11 +25,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+	iu "github.com/nats-io/natscli/internal/util"
+
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/choria-io/fisk"
 	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
-	"github.com/gosuri/uiprogress"
 	"github.com/nats-io/jsm.go"
 	"github.com/nats-io/nats.go"
 )
@@ -45,21 +49,24 @@ type objCommand struct {
 	placementTags       []string
 	maxBucketSize       int64
 	maxBucketSizeString string
+	metadata            map[string]string
 
 	description string
 	replicas    uint
 	ttl         time.Duration
+	compression bool
 }
 
 func configureObjectCommand(app commandHost) {
-	c := &objCommand{}
+	c := &objCommand{
+		metadata: map[string]string{},
+	}
 
 	help := `Interacts with a JetStream based Object store
 
 The JetStream Object store uses streams to store large objects
 for an indefinite period or a per-bucket configured TTL.
 
-NOTE: This is an experimental feature.
 `
 
 	obj := app.Command("object", help).Alias("obj")
@@ -74,6 +81,9 @@ NOTE: This is an experimental feature.
 	add.Flag("storage", "Storage backend to use (file, memory)").EnumVar(&c.storage, "file", "f", "memory", "m")
 	add.Flag("tags", "Place the store on servers that has specific tags").StringsVar(&c.placementTags)
 	add.Flag("cluster", "Place the store on a specific cluster").StringVar(&c.placementCluster)
+	add.Flag("metadata", "Adds metadata to the bucket").PlaceHolder("META").StringMapVar(&c.metadata)
+	add.Flag("compress", "Compress the bucket data").BoolVar(&c.compression)
+
 	add.PreAction(c.parseLimitStrings)
 
 	put := obj.Command("put", "Puts a file into the store").Action(c.putAction)
@@ -81,7 +91,7 @@ NOTE: This is an experimental feature.
 	put.Arg("file", "The file to put").ExistingFileVar(&c.file)
 	put.Flag("name", "Override the name supplied to the object store").StringVar(&c.overrideName)
 	put.Flag("description", "Sets an optional description for the object").StringVar(&c.description)
-	put.Flag("header", "Adds headers to the object").Short('H').StringsVar(&c.hdrs)
+	put.Flag("header", "Adds headers to the object using K:V format").Short('H').StringsVar(&c.hdrs)
 	put.Flag("progress", "Disable progress bars").Default("true").BoolVar(&c.progress)
 	put.Flag("force", "Act without confirmation").Short('f').UnNegatableBoolVar(&c.force)
 
@@ -119,7 +129,7 @@ func init() {
 
 func (c *objCommand) parseLimitStrings(_ *fisk.ParseContext) (err error) {
 	if c.maxBucketSizeString != "" {
-		c.maxBucketSize, err = parseStringAsBytes(c.maxBucketSizeString)
+		c.maxBucketSize, err = iu.ParseStringAsBytes(c.maxBucketSizeString)
 		if err != nil {
 			return err
 		}
@@ -134,7 +144,10 @@ func (c *objCommand) watchAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	w, err := obj.Watch(nats.IncludeHistory())
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	w, err := obj.Watch(ctx, jetstream.IncludeHistory())
 	if err != nil {
 		return err
 	}
@@ -146,9 +159,9 @@ func (c *objCommand) watchAction(_ *fisk.ParseContext) error {
 		}
 
 		if i.Deleted {
-			fmt.Printf("[%s] %s %s > %s\n", i.ModTime.Format("2006-01-02 15:04:05"), color.RedString("DEL"), i.Bucket, i.Name)
+			fmt.Printf("[%s] %s %s > %s\n", f(i.ModTime), color.RedString("DEL"), i.Bucket, i.Name)
 		} else {
-			fmt.Printf("[%s] %s %s > %s: %s bytes in %s chunks\n", i.ModTime.Format("2006-01-02 15:04:05"), color.GreenString("PUT"), i.Bucket, i.Name, humanize.IBytes(i.Size), humanize.Comma(int64(i.Chunks)))
+			fmt.Printf("[%s] %s %s > %s: %s bytes in %s chunks\n", f(i.ModTime), color.GreenString("PUT"), i.Bucket, i.Name, humanize.IBytes(i.Size), f(i.Chunks))
 		}
 	}
 
@@ -170,7 +183,10 @@ func (c *objCommand) sealAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	err = obj.Seal()
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	err = obj.Seal(ctx)
 	if err != nil {
 		return err
 	}
@@ -186,9 +202,13 @@ func (c *objCommand) delAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
 	if c.file != "" {
 		if !c.force {
-			nfo, err := obj.GetInfo(c.file)
+
+			nfo, err := obj.GetInfo(ctx, c.file)
 			if err != nil {
 				return err
 			}
@@ -203,7 +223,7 @@ func (c *objCommand) delAction(_ *fisk.ParseContext) error {
 				return nil
 			}
 		}
-		err = obj.Delete(c.file)
+		err = obj.Delete(ctx, c.file)
 		if err != nil {
 			return err
 		}
@@ -230,7 +250,10 @@ func (c *objCommand) delAction(_ *fisk.ParseContext) error {
 			return err
 		}
 
-		return js.DeleteObjectStore(c.bucket)
+		ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+		defer cancel()
+
+		return js.DeleteObjectStore(ctx, c.bucket)
 	}
 }
 
@@ -244,7 +267,10 @@ func (c *objCommand) infoAction(_ *fisk.ParseContext) error {
 		return c.showBucketInfo(obj)
 	}
 
-	nfo, err := obj.GetInfo(c.file)
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	nfo, err := obj.GetInfo(ctx, c.file)
 	if err != nil {
 		return err
 	}
@@ -254,89 +280,89 @@ func (c *objCommand) infoAction(_ *fisk.ParseContext) error {
 	return nil
 }
 
-func (c *objCommand) showBucketInfo(store nats.ObjectStore) error {
-	status, err := store.Status()
+func (c *objCommand) showBucketInfo(store jetstream.ObjectStore) error {
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	status, err := store.Status(ctx)
 	if err != nil {
 		return err
 	}
 
-	var nfo *nats.StreamInfo
+	var nfo *jetstream.StreamInfo
 	if status.BackingStore() == "JetStream" {
-		nfo = status.(*nats.ObjectBucketStatus).StreamInfo()
+		nfo = status.(*jetstream.ObjectBucketStatus).StreamInfo()
 	}
+
+	cols := newColumns("")
+	defer cols.Frender(os.Stdout)
 
 	if nfo == nil {
-		fmt.Printf("Information for Object Store Bucket %s\n", status.Bucket())
+		cols.SetHeading(fmt.Sprintf("Information for Object Store Bucket %s", status.Bucket()))
 	} else {
-		fmt.Printf("Information for Object Store Bucket %s created %s\n", status.Bucket(), nfo.Created.Local().Format(time.RFC3339))
+		cols.SetHeading(fmt.Sprintf("Information for Object Store Bucket %s created %s", status.Bucket(), nfo.Created.Local().Format(time.RFC3339)))
 	}
 
-	fmt.Println()
-	fmt.Println("Configuration:")
-	fmt.Println()
-	fmt.Printf("         Bucket Name: %s\n", status.Bucket())
-	if status.Description() != "" {
-		fmt.Printf("         Description: %s\n", status.Description())
-	}
-	fmt.Printf("            Replicas: %d\n", status.Replicas())
+	cols.AddSectionTitle("Configuration")
+	cols.AddRowf("Bucket Name", status.Bucket())
+	cols.AddRowIfNotEmpty("Description", status.Description())
+	cols.AddRow("Replicas", status.Replicas())
 	if status.TTL() == 0 {
-		fmt.Printf("                 TTL: unlimited\n")
+		cols.AddRow("TTL", "unlimited")
 	} else {
-		fmt.Printf("                 TTL: %s\n", humanizeDuration(status.TTL()))
+		cols.AddRow("TTL", status.TTL())
 	}
-
-	fmt.Printf("              Sealed: %v\n", status.Sealed())
-	fmt.Printf("                Size: %s\n", humanize.IBytes(status.Size()))
+	cols.AddRow("Sealed", status.Sealed())
+	cols.AddRow("Size", humanize.IBytes(status.Size()))
 	if nfo != nil {
 		if nfo.Config.MaxBytes == -1 {
-			fmt.Printf(" Maximum Bucket Size: unlimited\n")
+			cols.AddRow("Maximum Bucket Size", "unlimited")
 		} else {
-			fmt.Printf(" Maximum Bucket Size: %s\n", humanize.IBytes(uint64(nfo.Config.MaxBytes)))
+			cols.AddRow("Maximum Bucket Size", humanize.IBytes(uint64(nfo.Config.MaxBytes)))
 		}
 	}
-	fmt.Printf("  Backing Store Kind: %s\n", status.BackingStore())
+	cols.AddRow("Storage", status.Storage())
+	cols.AddRow("Backing Store Kind", status.BackingStore())
 	if status.BackingStore() == "JetStream" {
-		fmt.Printf("    JetStream Stream: %s\n", nfo.Config.Name)
+		cols.AddRow("JetStream Stream", nfo.Config.Name)
+
+		meta := jsm.FilterServerMetadata(nfo.Config.Metadata)
+		if len(meta) > 0 {
+			cols.AddMapStringsAsValue("Metadata", meta)
+		}
 
 		if nfo.Cluster != nil {
-			fmt.Println("\nCluster Information:")
-			fmt.Println()
-			renderNatsGoClusterInfo(nfo)
-			fmt.Println()
+			cols.AddSectionTitle("Cluster Information")
+			renderNatsGoClusterInfo(cols, nfo)
 		}
 	}
 
 	return nil
 }
 
-func (c *objCommand) showObjectInfo(nfo *nats.ObjectInfo) {
-	digest := strings.Split(nfo.Digest, "=")
+func (c *objCommand) showObjectInfo(nfo *jetstream.ObjectInfo) {
+	digest := strings.SplitN(nfo.Digest, "=", 2)
 	digestBytes, _ := base64.URLEncoding.DecodeString(digest[1])
 
-	fmt.Printf("Object information for %s > %s\n\n", nfo.Bucket, nfo.Name)
+	cols := newColumns(fmt.Sprintf("Object information for %s > %s", nfo.Bucket, nfo.Name))
+	defer cols.Frender(os.Stdout)
+
 	if nfo.Description != "" {
-		fmt.Printf("      Description: %s\n", nfo.Description)
+		cols.AddRowIfNotEmpty("Description", nfo.Description)
 	}
-	fmt.Printf("               Size: %s\n", humanize.IBytes(nfo.Size))
-	fmt.Printf("  Modification Time: %s\n", nfo.ModTime.Format(time.RFC822Z))
-	fmt.Printf("             Chunks: %s\n", humanize.Comma(int64(nfo.Chunks)))
-	fmt.Printf("             Digest: %s %x\n", digest[0], digestBytes)
-	if nfo.Deleted {
-		fmt.Printf("            Deleted: %v\n", nfo.Deleted)
-	}
+	cols.AddRow("Size", fiBytes(nfo.Size))
+	cols.AddRow("Modification Time", nfo.ModTime)
+	cols.AddRow("Chunks", nfo.Chunks)
+	cols.AddRowf("Digest", "%s %x", digest[0], digestBytes)
+	cols.AddRowIf("Deleted", nfo.Deleted, nfo.Deleted)
 	if len(nfo.Headers) > 0 {
-		fmt.Printf("            Headers: ")
-		first := true
+		var vals []string
 		for k, v := range nfo.Headers {
 			for _, i := range v {
-				if first {
-					fmt.Printf("%s: %s\n", k, i)
-					first = false
-				} else {
-					fmt.Printf("                     %s: %s\n", k, i)
-				}
+				vals = append(vals, fmt.Sprintf("%s: %s", k, i))
 			}
 		}
+		cols.AddStringsAsValue("Headers", vals)
 	}
 }
 
@@ -347,7 +373,7 @@ func (c *objCommand) listBuckets() error {
 	}
 
 	var found []*jsm.Stream
-	err = mgr.EachStream(nil, func(s *jsm.Stream) {
+	_, err = mgr.EachStream(nil, func(s *jsm.Stream) {
 		if s.IsObjectBucket() {
 			found = append(found, s)
 		}
@@ -375,12 +401,12 @@ func (c *objCommand) listBuckets() error {
 		return info.State.Bytes < jnfo.State.Bytes
 	})
 
-	table := newTableWriter("Object Store Buckets")
+	table := iu.NewTableWriter(opts(), "Object Store Buckets")
 	table.AddHeaders("Bucket", "Description", "Created", "Size", "Last Update")
 	for _, s := range found {
 		nfo, _ := s.LatestInformation()
 
-		table.AddRow(strings.TrimPrefix(s.Name(), "OBJ_"), s.Description(), nfo.Created.Format("2006-01-02 15:01:05"), humanize.IBytes(nfo.State.Bytes), humanizeDuration(time.Since(nfo.State.LastTime)))
+		table.AddRow(strings.TrimPrefix(s.Name(), "OBJ_"), s.Description(), f(nfo.Created), humanize.IBytes(nfo.State.Bytes), f(time.Since(nfo.State.LastTime)))
 	}
 
 	fmt.Println(table.Render())
@@ -398,7 +424,10 @@ func (c *objCommand) lsAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	contents, err := obj.List()
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	contents, err := obj.List(ctx)
 	if err != nil {
 		return err
 	}
@@ -408,7 +437,14 @@ func (c *objCommand) lsAction(_ *fisk.ParseContext) error {
 		return nil
 	}
 
-	table := newTableWriter("Bucket Contents")
+	if c.listNames {
+		for _, s := range contents {
+			fmt.Println(s.Name)
+		}
+		return nil
+	}
+
+	table := iu.NewTableWriter(opts(), "Bucket Contents")
 	table.AddHeaders("Name", "Size", "Time")
 
 	for _, i := range contents {
@@ -435,7 +471,10 @@ func (c *objCommand) putAction(_ *fisk.ParseContext) error {
 		return fmt.Errorf("--name is required when reading from stdin")
 	}
 
-	nfo, err := obj.GetInfo(name)
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	nfo, err := obj.GetInfo(ctx, name)
 	if err == nil && !nfo.Deleted && !c.force {
 		c.showObjectInfo(nfo)
 		fmt.Println()
@@ -445,9 +484,10 @@ func (c *objCommand) putAction(_ *fisk.ParseContext) error {
 		if !ok {
 			return nil
 		}
+		fmt.Println()
 	}
 
-	hdr, err := parseStringsToHeader(c.hdrs, 0)
+	hdr, err := iu.ParseStringsToHeader(c.hdrs, 0)
 	if err != nil {
 		return err
 	}
@@ -474,34 +514,41 @@ func (c *objCommand) putAction(_ *fisk.ParseContext) error {
 		pr = f
 	}
 
-	meta := &nats.ObjectMeta{
+	meta := jetstream.ObjectMeta{
 		Name:        filepath.Clean(name),
 		Description: c.description,
 		Headers:     hdr,
 	}
 
-	var progress *uiprogress.Bar
+	var progbar progress.Writer
+	var tracker *progress.Tracker
+
 	stop := func() {}
 
-	if !opts.Trace && c.progress && stat != nil && stat.Size() > 20480 {
-		hs := humanize.IBytes(uint64(stat.Size()))
-		progress = uiprogress.AddBar(int(stat.Size())).PrependFunc(func(b *uiprogress.Bar) string {
-			return fmt.Sprintf("%s / %s", humanize.IBytes(uint64(b.Current())), hs)
+	if !opts().Trace && c.progress && stat != nil && stat.Size() > 20480 {
+		progbar, tracker, err = iu.NewProgress(opts(), &progress.Tracker{
+			Total: stat.Size(),
+			Units: iu.ProgressUnitsIBytes,
 		})
-		progress.Width = progressWidth()
+		if err != nil {
+			return err
+		}
 
-		fmt.Println()
-		uiprogress.Start()
-		stop = func() { uiprogress.Stop(); fmt.Println() }
-		pr = &progressRW{p: progress, r: pr}
+		stop = func() {
+			time.Sleep(300 * time.Millisecond)
+			progbar.Stop()
+			fmt.Println()
+		}
+		pr = &progressRW{p: progbar, t: tracker, r: pr}
 	}
 
-	nfo, err = obj.Put(meta, pr)
+	nfo, err = obj.Put(context.TODO(), meta, pr)
 	stop()
 	if err != nil {
 		return err
 	}
 
+	fmt.Println()
 	c.showObjectInfo(nfo)
 
 	return nil
@@ -513,7 +560,7 @@ func (c *objCommand) getAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	res, err := obj.Get(c.file)
+	res, err := obj.Get(context.Background(), c.file)
 	if err != nil {
 		return err
 	}
@@ -555,21 +602,28 @@ func (c *objCommand) getAction(_ *fisk.ParseContext) error {
 	}
 	defer of.Close()
 
-	var progress *uiprogress.Bar
+	var progbar progress.Writer
+	var tracker *progress.Tracker
+
 	pw := io.Writer(of)
 	stop := func() {}
 
-	if !opts.Trace && c.progress && nfo.Size > 20480 {
-		hs := humanize.IBytes(nfo.Size)
-		progress = uiprogress.AddBar(int(nfo.Size)).PrependFunc(func(b *uiprogress.Bar) string {
-			return fmt.Sprintf("%s / %s", humanize.IBytes(uint64(b.Current())), hs)
-		})
-		progress.Width = progressWidth()
-
+	if !opts().Trace && c.progress && nfo.Size > 20480 {
 		fmt.Println()
-		uiprogress.Start()
-		stop = func() { uiprogress.Stop(); fmt.Println() }
-		pw = &progressRW{p: progress, w: of}
+		progbar, tracker, err = iu.NewProgress(opts(), &progress.Tracker{
+			Total: int64(nfo.Size),
+			Units: iu.ProgressUnitsIBytes,
+		})
+		if err != nil {
+			return err
+		}
+		stop = func() {
+			time.Sleep(300 * time.Millisecond)
+			progbar.Stop()
+			fmt.Println()
+		}
+
+		pw = &progressRW{p: progbar, t: tracker, w: of}
 	}
 
 	start := time.Now()
@@ -590,9 +644,9 @@ func (c *objCommand) getAction(_ *fisk.ParseContext) error {
 	elapsed := time.Since(start)
 	if elapsed > 2*time.Second {
 		bps := float64(nfo.Size) / elapsed.Seconds()
-		fmt.Printf("Wrote: %s to %s in %v average %s/s\n", humanize.IBytes(uint64(wc)), of.Name(), humanizeDuration(elapsed), humanize.IBytes(uint64(bps)))
+		fmt.Printf("Wrote: %s to %s in %v average %s/s\n", humanize.IBytes(uint64(wc)), of.Name(), f(elapsed), humanize.IBytes(uint64(bps)))
 	} else {
-		fmt.Printf("Wrote: %s to %s in %v\n", humanize.IBytes(uint64(wc)), of.Name(), humanizeDuration(elapsed))
+		fmt.Printf("Wrote: %s to %s in %v\n", humanize.IBytes(uint64(wc)), of.Name(), f(elapsed))
 	}
 
 	return nil
@@ -604,24 +658,29 @@ func (c *objCommand) addAction(_ *fisk.ParseContext) error {
 		return err
 	}
 
-	st := nats.FileStorage
+	st := jetstream.FileStorage
 	if c.storage == "memory" || c.storage == "m" {
-		st = nats.MemoryStorage
+		st = jetstream.MemoryStorage
 	}
 
-	placement := &nats.Placement{Cluster: c.placementCluster}
+	placement := &jetstream.Placement{Cluster: c.placementCluster}
 	if len(c.placementTags) > 0 {
 		placement.Tags = c.placementTags
 	}
 
-	obj, err := js.CreateObjectStore(&nats.ObjectStoreConfig{
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	obj, err := js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
 		Bucket:      c.bucket,
 		Description: c.description,
 		TTL:         c.ttl,
 		Storage:     st,
 		Replicas:    int(c.replicas),
 		Placement:   placement,
-		MaxBytes:    int64(c.maxBucketSize),
+		MaxBytes:    c.maxBucketSize,
+		Metadata:    c.metadata,
+		Compression: c.compression,
 	})
 	if err != nil {
 		return err
@@ -630,7 +689,7 @@ func (c *objCommand) addAction(_ *fisk.ParseContext) error {
 	return c.showBucketInfo(obj)
 }
 
-func (c *objCommand) loadBucket() (*nats.Conn, nats.JetStreamContext, nats.ObjectStore, error) {
+func (c *objCommand) loadBucket() (*nats.Conn, jetstream.JetStream, jetstream.ObjectStore, error) {
 	nc, js, err := prepareJSHelper()
 	if err != nil {
 		return nil, nil, nil, err
@@ -646,17 +705,20 @@ func (c *objCommand) loadBucket() (*nats.Conn, nats.JetStreamContext, nats.Objec
 			return nil, nil, nil, fmt.Errorf("no Object buckets found")
 		}
 
-		err = askOne(&survey.Select{
+		err = iu.AskOne(&survey.Select{
 			Message:  "Select a Bucket",
 			Options:  known,
-			PageSize: selectPageSize(len(known)),
+			PageSize: iu.SelectPageSize(len(known)),
 		}, &c.bucket)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 	}
 
-	store, err := js.ObjectStore(c.bucket)
+	ctx, cancel := context.WithTimeout(ctx, opts().Timeout)
+	defer cancel()
+
+	store, err := js.ObjectStore(ctx, c.bucket)
 	if err != nil {
 		return nil, nil, nil, err
 	}

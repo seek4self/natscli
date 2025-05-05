@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,6 +16,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	iu "github.com/nats-io/natscli/internal/util"
 	"os"
 	"sort"
 	"strings"
@@ -36,20 +37,21 @@ type SrvLsCmd struct {
 }
 
 type srvListCluster struct {
-	name  string
-	nodes []string
-	gwOut int
-	gwIn  int
-	conns int
+	name       string
+	nodes      []string
+	gwOut      int
+	gwIn       int
+	conns      int
+	routeSizes []int
 }
 
 func configureServerListCommand(srv *fisk.CmdClause) {
 	c := &SrvLsCmd{}
 
-	ls := srv.Command("ls", "List known servers").Alias("list").Action(c.list)
+	ls := srv.Command("list", "List known servers").Alias("ls").Action(c.list)
 	ls.Arg("expect", "How many servers to expect").Uint32Var(&c.expect)
 	ls.Flag("json", "Produce JSON output").Short('j').UnNegatableBoolVar(&c.json)
-	ls.Flag("sort", "Sort servers by a specific key (name,conns,subs,routes,gws,mem,cpu,slow,uptime,rtt").Default("rtt").EnumVar(&c.sort, strings.Split("name,conns,conn,subs,sub,routes,route,gw,mem,cpu,slow,uptime,rtt", ",")...)
+	ls.Flag("sort", "Sort servers by a specific key (name,cluster,conns,subs,routes,gws,mem,cpu,slow,uptime,rtt").Default("rtt").EnumVar(&c.sort, strings.Split("name,cluster,conns,conn,subs,sub,routes,route,gw,mem,cpu,slow,uptime,rtt", ",")...)
 	ls.Flag("reverse", "Reverse sort servers").Short('R').UnNegatableBoolVar(&c.reverse)
 	ls.Flag("compact", "Compact server names").Default("true").BoolVar(&c.compact)
 }
@@ -105,12 +107,14 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 		if cluster != "" {
 			_, ok := clusters[cluster]
 			if !ok {
-				clusters[cluster] = &srvListCluster{cluster, []string{}, 0, 0, 0}
+				clusters[cluster] = &srvListCluster{name: cluster}
 			}
 
 			clusters[cluster].conns += ssm.Stats.Connections
 			clusters[cluster].nodes = append(clusters[cluster].nodes, ssm.Server.Name)
 			clusters[cluster].gwOut += len(ssm.Stats.Gateways)
+			clusters[cluster].routeSizes = append(clusters[cluster].routeSizes, len(ssm.Stats.Routes))
+
 			for _, g := range ssm.Stats.Gateways {
 				clusters[cluster].gwIn += g.NumInbound
 			}
@@ -127,7 +131,7 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 	}
 
 	if c.json {
-		printJSON(results)
+		iu.PrintJSON(results)
 		return nil
 	}
 
@@ -146,15 +150,31 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 
 		switch c.sort {
 		case "name":
-			return results[i].Server.Name < results[j].Server.Name
+			return rev(results[i].Server.Name > results[j].Server.Name)
 		case "conns", "conn":
 			return rev(stati.Connections < statj.Connections)
 		case "subs", "sub":
 			return rev(stati.NumSubs < statj.NumSubs)
 		case "routes", "route":
-			return rev(len(stati.Routes) < len(statj.Routes))
+			// if routes are the same, most typical, we sort by name
+			il := len(stati.Routes)
+			jl := len(statj.Routes)
+
+			if il != jl {
+				return rev(il < jl)
+			}
+
+			return rev(results[i].Server.Name > results[j].Server.Name)
 		case "gws", "gw":
-			return rev(len(stati.Gateways) < len(statj.Gateways))
+			// if gateways are the same, most typical, we sort by name
+			il := len(stati.Gateways)
+			jl := len(statj.Gateways)
+
+			if il != jl {
+				return rev(il < jl)
+			}
+
+			return rev(results[i].Server.Name > results[j].Server.Name)
 		case "mem":
 			return rev(stati.Mem < statj.Mem)
 		case "cpu":
@@ -163,12 +183,19 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 			return rev(stati.SlowConsumers < statj.SlowConsumers)
 		case "uptime":
 			return rev(stati.Start.UnixNano() > statj.Start.UnixNano())
+		case "cluster":
+			// we default to reverse, so we swap this since alpha is better by default
+			if results[i].Server.Cluster != results[j].Server.Cluster {
+				return !rev(results[i].Server.Cluster < results[j].Server.Cluster)
+			}
+
+			return !rev(results[i].Server.Name > results[j].Server.Name)
 		default:
 			return rev(results[i].rtt > results[j].rtt)
 		}
 	})
 
-	table := newTableWriter("Server Overview")
+	table := iu.NewTableWriter(opts(), "Server Overview")
 	table.AddHeaders("Name", "Cluster", "Host", "Version", "JS", "Conns", "Subs", "Routes", "GWs", "Mem", "CPU %", "Cores", "Slow", "Uptime", "RTT")
 
 	// here so its after the sort
@@ -179,8 +206,22 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 	cNames := names
 	cHosts := hosts
 	if c.compact {
-		cNames = compactStrings(names)
-		cHosts = compactStrings(hosts)
+		cNames = iu.CompactStrings(names)
+		cHosts = iu.CompactStrings(hosts)
+	}
+
+	versionsOk := ""
+	gwaysOk := ""
+	routesOk := ""
+
+	// handle asymmetric clusters by ensuring each cluster has same route count
+	// rather than all nodes in all clusters having the same route count
+	for _, v := range clusters {
+		for _, s := range v.routeSizes {
+			if s != v.routeSizes[0] {
+				routesOk = "X"
+			}
+		}
 	}
 
 	for i, ssm := range results {
@@ -194,38 +235,73 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 			}
 		}
 
+		if ssm.Server.Version != results[0].ServerStatsMsg.Server.Version {
+			versionsOk = "X"
+		}
+
+		if len(ssm.Stats.Gateways) != len(results[0].ServerStatsMsg.Stats.Gateways) {
+			gwaysOk = "X"
+		}
+
+		var slow []string
+		if ssm.Stats.SlowConsumersStats != nil {
+			sstat := ssm.Stats.SlowConsumersStats
+			if sstat.Clients > 0 {
+				slow = append(slow, fmt.Sprintf("c: %s", f(sstat.Clients)))
+			}
+			if sstat.Routes > 0 {
+				slow = append(slow, fmt.Sprintf("r: %s", f(sstat.Routes)))
+			}
+			if sstat.Gateways > 0 {
+				slow = append(slow, fmt.Sprintf("g: %s", f(sstat.Gateways)))
+			}
+			if sstat.Leafs > 0 {
+				slow = append(slow, fmt.Sprintf("l: %s", f(sstat.Leafs)))
+			}
+
+			// only print details if non clients also had slow consumers
+			if len(slow) == 1 && sstat.Clients > 0 {
+				slow = []string{}
+			}
+		}
+
+		sc := f(ssm.Stats.SlowConsumers)
+		if len(slow) > 0 {
+			sc = fmt.Sprintf("%s (%s)", sc, strings.Join(slow, " "))
+		}
+
 		table.AddRow(
 			cNames[i],
 			cluster,
 			cHosts[i],
 			ssm.Server.Version,
 			jsEnabled,
-			humanize.Comma(int64(ssm.Stats.Connections)),
-			humanize.Comma(int64(ssm.Stats.NumSubs)),
+			f(ssm.Stats.Connections),
+			f(ssm.Stats.NumSubs),
 			len(ssm.Stats.Routes),
 			len(ssm.Stats.Gateways),
 			humanize.IBytes(uint64(ssm.Stats.Mem)),
 			fmt.Sprintf("%.0f", ssm.Stats.CPU),
 			ssm.Stats.Cores,
-			ssm.Stats.SlowConsumers,
-			humanizeDuration(ssm.Server.Time.Sub(ssm.Stats.Start)),
-			ssm.rtt.Round(time.Millisecond))
+			sc,
+			f(ssm.Server.Time.Sub(ssm.Stats.Start)),
+			f(ssm.rtt.Round(time.Millisecond)))
 	}
 
-	table.AddSeparator()
-	table.AddRow(
+	table.AddFooter(
 		"",
 		len(clusters),
 		servers,
-		"",
+		versionsOk,
 		js,
-		humanize.Comma(int64(connections)),
-		humanize.Comma(int64(subs)),
-		"", "",
+		f(connections),
+		f(subs),
+		routesOk,
+		gwaysOk,
 		humanize.IBytes(uint64(memory)),
 		"",
 		"",
-		humanize.Comma(slow),
+		f(slow),
 		"",
 		"")
 
@@ -240,7 +316,7 @@ func (c *SrvLsCmd) list(_ *fisk.ParseContext) error {
 
 func (c *SrvLsCmd) showClusters(cl map[string]*srvListCluster) {
 	fmt.Println()
-	table := newTableWriter("Cluster Overview")
+	table := iu.NewTableWriter(opts(), "Cluster Overview")
 	table.AddHeaders("Cluster", "Node Count", "Outgoing Gateways", "Incoming Gateways", "Connections")
 
 	var clusters []*srvListCluster
@@ -264,8 +340,8 @@ func (c *SrvLsCmd) showClusters(cl map[string]*srvListCluster) {
 		conns += c.conns
 		table.AddRow(c.name, len(c.nodes), c.gwOut, c.gwIn, c.conns)
 	}
-	table.AddSeparator()
-	table.AddRow("", nodes, out, in, conns)
+
+	table.AddFooter("", nodes, out, in, conns)
 
 	fmt.Print(table.Render())
 }
